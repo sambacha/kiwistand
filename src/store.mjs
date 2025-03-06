@@ -1,6 +1,7 @@
 // @format
-import { env } from "process";
+import process, { env } from "process";
 import { resolve } from "path";
+import cluster from "cluster";
 
 import Piscina from "piscina";
 import fastq from "fastq";
@@ -22,11 +23,13 @@ import canonicalize from "canonicalize";
 
 import log from "./logger.mjs";
 import LMDB from "./lmdb.mjs";
+import { getSlug } from "./utils.mjs";
 import { verify, ecrecover, toDigest, cacheResultAsync } from "./id.mjs";
 import { EIP712_MESSAGE } from "./constants.mjs";
 import { elog } from "./utils.mjs";
 import * as messages from "./topics/messages.mjs";
 import { newWalk } from "./WalkController.mjs";
+import { purgeCache } from "./cloudflarePurge.mjs";
 import { insertMessage, isReactionComment } from "./cache.mjs";
 import { triggerNotification } from "./subscriptions.mjs";
 
@@ -46,9 +49,34 @@ export const commentCounts = new Map();
 
 // TODO: This function is badly named, it should be renamed to
 // "incrementCommentsCount"
-export function addComment(storyId) {
+export function addComment(storyId, sync = false) {
   const count = commentCounts.get(storyId) || 0;
   commentCounts.set(storyId, count + 1);
+
+  if (sync) {
+    sendCommentUpdateToWorkers(storyId);
+  }
+}
+
+function sendCommentUpdateToWorkers(storyId) {
+  if (!cluster.isPrimary) return;
+
+  for (const id in cluster.workers) {
+    cluster.workers[id].send({
+      type: "increment-comment-count",
+      storyId,
+    });
+  }
+}
+
+if (cluster.worker) {
+  process.on("message", (message) => {
+    if (message.type === "increment-comment-count") {
+      const sync = false;
+      addComment(message.storyId, sync);
+      log(`Worker ${process.pid} updated comment count for ${message.storyId}`);
+    }
+  });
 }
 //
 // TODO: This function would benefit from constraining operation only to
@@ -72,15 +100,32 @@ export function passesReaction(marker) {
 
 export async function cache(upvotes, comments) {
   log("Caching upvote ids of upvotes, this can take a minute...");
-  for (const { identity, href, type } of upvotes) {
+
+  // Process upvotes with periodic yields
+  for (let i = 0; i < upvotes.length; i++) {
+    const { identity, href, type } = upvotes[i];
     const marker = upvoteID(identity, href, type);
     passes(marker);
+
+    // Yield to the event loop every 100 items
+    if (i % 100 === 0 && i > 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
-  for (const { href, title, identity } of comments) {
-    addComment(href);
+
+  // Process comments with periodic yields
+  for (let i = 0; i < comments.length; i++) {
+    const { href, title, identity } = comments[i];
+    const sync = false;
+    addComment(href, sync);
     if (isReactionComment(title)) {
       const reactionMarker = upvoteID(identity, href, "reaction");
       passesReaction(reactionMarker);
+    }
+
+    // Yield to the event loop every 100 items
+    if (i % 100 === 0 && i > 0) {
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 }
@@ -194,7 +239,14 @@ export async function compare(localTrie, remotes) {
   const match = [];
   const missing = [];
   const mismatch = [];
-  for (let remoteNode of remotes) {
+  for (let i = 0; i < remotes.length; i++) {
+    const remoteNode = remotes[i];
+
+    // Yield to the event loop periodically
+    if (i % 50 === 0 && i > 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
     // NOTE: In case the level:0 is being compared and we're having to deal
     // with the root node.
     if (remoteNode.level === 0 && isEqual(localTrie.root(), remoteNode.hash)) {
@@ -238,16 +290,16 @@ export async function descend(trie, level, exclude = []) {
     ];
   }
 
+  // Convert exclude array to a Set for O(1) lookups instead of O(n)
+  const excludeSet = new Set(exclude.map((buffer) => buffer.toString("hex")));
+
   let nodes = [];
   const onFound = (_, node, key, walkController, currentLevel) => {
     const nodeHash = hash(node);
-    // TODO: Would be better if this was a set where all the hashes are included
-    // e.g. as strings? It seems very slow to look up something using find.
-    const match = exclude.find((markedNode) => isEqual(markedNode, nodeHash));
-    // NOTE: The idea of the "exclude" array is that it contains nodes that
-    // have matched on the remote trie, and so we don't have to send them along
-    // in a future comparison. Hence, if we have a match, we simply return.
-    if (match) return;
+
+    // Use Set for faster lookups
+    const nodeHashHex = nodeHash.toString("hex");
+    if (excludeSet.has(nodeHashHex)) return;
 
     if (currentLevel === 0) {
       if (level !== 0 && node instanceof LeafNode) {
@@ -255,6 +307,11 @@ export async function descend(trie, level, exclude = []) {
         key = Buffer.concat(fragments);
       } else {
         key = nibblesToBuffer(key);
+      }
+
+      // Yield to the event loop periodically during heavy processing
+      if (nodes.length % 100 === 0) {
+        setImmediate(resolve);
       }
 
       nodes.push({
@@ -344,7 +401,32 @@ async function atomicPut(trie, message, identity, accounts, delegations) {
       const enhancer = enhance(accounts, delegations, cacheEnabled);
       const enhancedMessage = await enhancer(message);
       insertMessage(enhancedMessage);
-      await triggerNotification(enhancedMessage);
+
+      // Only purge cache for comments, not for upvotes
+      if (message.type === "comment") {
+        const [, commentIndex] = message.href.split(":");
+        // Purge the main stories page synchronously so the user can see their comment
+        await purgeCache(
+          `https://news.kiwistand.com/stories?index=${commentIndex}`,
+        );
+
+        // Purge other caches asynchronously
+        purgeCache(
+          `https://news.kiwistand.com/stories/${getSlug(
+            message.title,
+          )}?index=${commentIndex}`,
+        ).catch((err) => log(`Failed to purge Cloudflare cache: ${err}`));
+        purgeCache(
+          `https://news.kiwistand.com/api/v1/stories?index=${commentIndex}`,
+        ).catch((err) => log(`Failed to purge Cloudflare cache: ${err}`));
+      }
+
+      // Trigger notifications asynchronously with promise chain
+      triggerNotification(enhancedMessage)
+        .then(() => {
+          // Notification sent successfully
+        })
+        .catch((err) => log(`Failed to trigger notification: ${err}`));
     } catch (err) {
       // NOTE: insertMessage is just a cache, so if this operation fails, we
       // want the protocol to continue to execute as normally.
@@ -358,7 +440,8 @@ async function atomicPut(trie, message, identity, accounts, delegations) {
     }
     // TODO: Remove and replace with SQLite implementation
     if (message.type === "comment") {
-      addComment(message.href);
+      const syncCount = true;
+      addComment(message.href, syncCount);
     }
   } catch (err) {
     if (message.type !== "amplify") {
@@ -632,6 +715,11 @@ export async function leaves(
       break;
     }
 
+    // Yield to the event loop periodically during heavy processing
+    if (nodes.length % 100 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
     const value = decode(node.value());
     if (parser) {
       const parsed = parser(value);
@@ -669,6 +757,9 @@ export async function leaves(
   return nodes;
 }
 
+// Track the number of nodes processed to periodically yield to the event loop
+let nodesProcessed = 0;
+
 /**
  * @param {Trie} trie
  * @param {Buffer | Buffer[]} nodeRef
@@ -681,6 +772,12 @@ async function* walkTrieDfs(trie, nodeRef, key) {
     nodeRef.equals(trie.EMPTY_TRIE_ROOT)
   ) {
     return;
+  }
+
+  // Yield to the event loop periodically during heavy processing
+  nodesProcessed++;
+  if (nodesProcessed % 100 === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
   }
 
   const node = await trie.lookupNode(nodeRef);

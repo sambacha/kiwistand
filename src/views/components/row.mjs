@@ -7,8 +7,7 @@ import {
 import { URL } from "url";
 import DOMPurify from "isomorphic-dompurify";
 import ethers from "ethers";
-import slugify from "slugify";
-slugify.extend({ "′": "", "'": "", "'": "" });
+import { getSlug } from "../../utils.mjs";
 
 import { commentCounts } from "../../store.mjs";
 import ShareIcon from "./shareicon.mjs";
@@ -294,10 +293,6 @@ const row = (
       (story.lastComment.identity.ens ||
         story.lastComment.identity.farcaster ||
         story.lastComment.identity.lens) &&
-      differenceInHours(
-        new Date(),
-        new Date(story.lastComment.timestamp * 1000),
-      ) < 20 &&
       !invert;
     return html`
       <tr style="${invert ? "background-color: black;" : ""}">
@@ -327,11 +322,13 @@ const row = (
                 >
                   <div style="position: relative;">
                     <img
-                      loading="lazy"
+                      ${path === "/stories" ? 'loading="lazy"' : i > 2 ? 'loading="lazy"' : ""}
                       style="aspect-ratio: 2 / 1; object-fit:cover; margin: 0 11px; border-radius: 2px; width: calc(100% - 24px);"
                       src="${DOMPurify.sanitize(story.metadata.image)}"
                     />
-                    <div style="position: absolute; bottom: 8px; left: 19px; background: rgba(255,255,255,0.9); padding: 2px 6px; border-radius: 2px; font-size: 9pt;">
+                    <div
+                      style="position: absolute; bottom: 8px; left: 19px; background: rgba(255,255,255,0.9); padding: 2px 6px; border-radius: 2px; font-size: 9pt;"
+                    >
                       ${extractedDomain}
                     </div>
                   </div>
@@ -419,7 +416,7 @@ const row = (
                       )}', event.currentTarget.getAttribute('target'));"
                     >
                       <img
-                        loading="lazy"
+                        ${path === "/stories" ? 'loading="lazy"' : i > 2 ? 'loading="lazy"' : ""}
                         style="max-height: 61px; border: var(--border-line); border-radius: 2px; width: 110px; object-fit: cover;"
                         src="${DOMPurify.sanitize(story.metadata.image)}"
                     /></a>`
@@ -445,8 +442,8 @@ const row = (
                           DOMPurify.sanitize(story.href),
                           story.identity,
                         )}', event.currentTarget.getAttribute('target'));"
-                        data-story-link="/stories/${slugify(
-                          DOMPurify.sanitize(story.title),
+                        data-story-link="/stories/${getSlug(
+                          story.title,
                         )}?index=0x${story.index}"
                         target="${path === "/submit" ||
                         path === "/demonstration"
@@ -459,13 +456,22 @@ const row = (
                           ? html`<mark
                               style="background-color: rgba(255,255,0, 0.05); padding: 0px 2px;"
                               >${truncateLongWords(
-                                DOMPurify.sanitize(story.title),
+                                DOMPurify.sanitize(
+                                  story.metadata &&
+                                    story.metadata.compliantTitle
+                                    ? story.metadata.compliantTitle
+                                    : story.title,
+                                ),
                               )}</mark
                             >`
                           : html`${pinned
                               ? html`${pin} `
                               : ""}${truncateLongWords(
-                              DOMPurify.sanitize(story.title),
+                              DOMPurify.sanitize(
+                                story.metadata && story.metadata.compliantTitle
+                                  ? story.metadata.compliantTitle
+                                  : story.title,
+                              ),
                             )}`}
                       </a>
                       <span> </span>
@@ -477,6 +483,7 @@ const row = (
                   >
                     <span style="opacity: 0.8">
                       ${path !== "/stories" &&
+                      story.avatars &&
                       story.avatars.length > 3 &&
                       html`
                         <span>
@@ -502,12 +509,54 @@ const row = (
                       `}
                       ${story.index
                         ? html`
+                            ${story.label === "FUD"
+                              ? html`<span
+                                  style="vertical-align: -2px; font-size: 8pt; background-color:#FFEB3B; color:#000; padding:2px 4px; border-radius:2px; margin-right:4px; display:inline-flex; align-items:center;"
+                                  ><svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 256 256"
+                                    style="width:12px; height:12px; margin-right:4px;"
+                                  >
+                                    <rect
+                                      width="256"
+                                      height="256"
+                                      fill="none"
+                                    />
+                                    <path
+                                      d="M109.77,97,83.82,52a8,8,0,0,0-11.55-2.54A95.94,95.94,0,0,0,32,119.14,8.1,8.1,0,0,0,40,128H92"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
+                                      stroke-width="16"
+                                    />
+                                    <path
+                                      d="M146.23,97l26-44.94a8,8,0,0,1,11.55-2.54A95.94,95.94,0,0,1,224,119.14a8.1,8.1,0,0,1-8,8.86H164"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
+                                      stroke-width="16"
+                                    />
+                                    <path
+                                      d="M146,159.18l25.83,44.73a8,8,0,0,1-3.56,11.26,96.24,96.24,0,0,1-80.54,0,8,8,0,0,1-3.56-11.26L110,159.18"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
+                                      stroke-width="16"
+                                    />
+                                    <circle cx="128" cy="128" r="12" /></svg
+                                  >FUD</span
+                                >`
+                              : ""}
                             <a
                               class="meta-link"
                               style="user-select: text;"
-                              href="/stories/${slugify(
-                                DOMPurify.sanitize(story.title),
+                              href="/stories/${getSlug(
+                                story.title,
                               )}?index=0x${story.index}"
+                              onclick="if(!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button !== 1) document.getElementById('spinner-overlay').style.display='block'"
                             >
                               ${formatDistanceToNowStrict(
                                 new Date(story.timestamp * 1000),
@@ -520,11 +569,12 @@ const row = (
                             )}
                           `}
                       ${!interactive &&
-                      (path === "/" || path === "/new" || path === "/best") &&
-                      !displayMobileImage
+                      (path === "/" || path === "/new" || path === "/best")
                         ? html`
-                            <span style="opacity:0.6"> • </span>
-                            <span>${extractedDomain}</span>
+                            <span class="domain-text">
+                              <span style="opacity:0.6"> • </span>
+                              <span>${extractedDomain}</span>
+                            </span>
                           `
                         : ""}
                       <span style="opacity:0.6"> • </span>
@@ -536,6 +586,7 @@ const row = (
                               ? `/${story.submitter.ens}`
                               : `/upvotes?address=${story.identity}`}"
                             class="meta-link"
+                            onclick="if(!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button !== 1) document.getElementById('spinner-overlay').style.display='block'"
                             style="font-weight: 500; user-select: text; ${recentJoiners &&
                             recentJoiners.includes(story.identity)
                               ? `color: ${theme.color};`
@@ -547,6 +598,27 @@ const row = (
                         ? html`<a class="meta-link" href="javascript:void(0);"
                             >${story.displayName}</a
                           >`
+                        : story.displayName === "Feedbot"
+                        ? html`<span
+                            class="meta-link"
+                            style="touch-action: manipulation; user-select: none; display: inline-flex; align-items: center; vertical-align: -1px;"
+                          >
+                            <svg
+                              style="width: 12px; height: 12px; margin-right: 4px; vertical-align: -1px;"
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 256 256"
+                            >
+                              <rect width="256" height="256" fill="none" />
+                              <path
+                                d="M88,64a.12.12,0,0,0-.12.12A.12.12,0,0,0,88,64Z"
+                                opacity="0.2"
+                              />
+                              <path
+                                d="M216,48H40A16,16,0,0,0,24,64V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48ZM40,64H216v32H40ZM216,192H40V112H216v80Zm-16-24a8,8,0,0,1-8,8H152a8,8,0,0,1,0-16h40A8,8,0,0,1,200,168Zm0-32a8,8,0,0,1-8,8H104a8,8,0,0,1,0-16h88A8,8,0,0,1,200,136Z"
+                              />
+                            </svg>
+                            ${story.displayName}
+                          </span>`
                         : html`<a
                             target="_blank"
                             class="meta-link"
@@ -599,8 +671,8 @@ const row = (
                                   class="caster-link share-link"
                                   title="Share"
                                   style="color: var(--contrast-color); touch-action: manipulation; user-select: none; white-space: nowrap;"
-                                  onclick="event.preventDefault(); navigator.share({url: 'https://news.kiwistand.com/stories/${slugify(
-                                    DOMPurify.sanitize(story.title),
+                                  onclick="event.preventDefault(); navigator.share({url: 'https://news.kiwistand.com/stories/${getSlug(
+                                    story.title,
                                   )}?index=0x${story.index}' });"
                                 >
                                   ${ShareIcon(
@@ -619,12 +691,14 @@ const row = (
                               <span class="inverse-share-container">
                                 <span style="opacity:0.6"> • </span>
                                 <a
-                                  href="#"
+                                  href="https://news.kiwistand.com/stories/${getSlug(
+                                    story.title,
+                                  )}?index=0x${story.index}"
                                   class="meta-link share-link"
                                   title="Share"
                                   style="color: var(--contrast-color); touch-action: manipulation; user-select: none; white-space: nowrap;"
-                                  onclick="event.preventDefault(); navigator.clipboard.writeText('https://news.kiwistand.com/stories/${slugify(
-                                    DOMPurify.sanitize(story.title),
+                                  onclick="event.preventDefault(); navigator.clipboard.writeText('https://news.kiwistand.com/stories/${getSlug(
+                                    story.title,
                                   )}?index=0x${story.index}'); window.toast.success('Link copied!');"
                                 >
                                   ${CopyIcon(
@@ -655,9 +729,10 @@ const row = (
                     <a
                       class="chat-bubble interaction-element"
                       id="chat-bubble-${story.index}"
-                      href="/stories/${slugify(
-                        DOMPurify.sanitize(story.title),
+                      href="/stories/${getSlug(
+                        story.title,
                       )}?index=0x${story.index}"
+                      onclick="if(!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button !== 1) document.getElementById('spinner-overlay').style.display='block'"
                       style="margin: 5px; border: var(--border-thin); background-color: var(--bg-off-white); border-radius: 2px; display: ${path ===
                       "/stories"
                         ? "none"

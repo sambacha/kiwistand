@@ -4,17 +4,398 @@ import { WagmiConfig, useAccount } from "wagmi";
 import { RainbowKitProvider } from "@rainbow-me/rainbowkit";
 import { eligible } from "@attestate/delegator2";
 import SwipeableDrawer from "@mui/material/SwipeableDrawer";
+import { Wallet } from "@ethersproject/wallet";
 
 import { Connector, TextConnectButton } from "./Navigation.jsx";
 import { RestoreDialogue } from "./Passkeys.jsx";
-import { fetchNotifications } from "./API.mjs";
+import * as API from "./API.mjs";
 import { isIOS, getLocalAccount, getCookie } from "./session.mjs";
-import { client, chains } from "./client.mjs";
+import { client, chains, useProvider } from "./client.mjs";
 import { dynamicPrefetch } from "./main.jsx";
 
-const IOSAppLogin = ({ allowlist, delegations, toast }) => {
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+const EmailSubscriptionForm = ({
+  onSuccess,
+  allowlist,
+  delegations,
+  toast,
+}) => {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState("");
+  const [subscribeToComments, setSubscribeToComments] = useState(true);
+  const [subscribeToNewsletter, setSubscribeToNewsletter] = useState(true);
+  const [subscribeToUpdates, setSubscribeToUpdates] = useState(true);
+  const account = useAccount();
+  const localAccount = getLocalAccount(account.address, allowlist);
+  const provider = useProvider();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setStatus("sending");
+
+    try {
+      // Subscribe to comment notifications
+      if (subscribeToComments) {
+        const value = API.messageFab(email, email, "EMAILAUTH");
+        let signature;
+        try {
+          const signer = new Wallet(localAccount.privateKey, provider);
+          signature = await signer._signTypedData(
+            API.EIP712_DOMAIN,
+            API.EIP712_TYPES,
+            value,
+          );
+        } catch (err) {
+          console.error("Signing failed:", err);
+          setStatus("error");
+          return;
+        }
+
+        const wait = null;
+        const endpoint = "/api/v1/email-notifications";
+        const port = window.location.port;
+
+        try {
+          const response = await API.send(
+            value,
+            signature,
+            wait,
+            endpoint,
+            port,
+          );
+          if (response.status !== "success") {
+            console.error("API error:", response.details);
+            throw new Error(
+              response.details || "Failed to subscribe to comments",
+            );
+          }
+        } catch (err) {
+          console.error("Network request failed:", err);
+          throw err;
+        }
+      }
+
+      // Subscribe to newsletter
+      if (subscribeToNewsletter) {
+        const response = await fetch(
+          "https://paragraph.xyz/api/blogs/@kiwi-weekly/subscribe",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ email }),
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error("Newsletter subscription failed");
+        }
+      }
+
+      // Subscribe to Kiwi Updates
+      if (subscribeToUpdates) {
+        const response = await fetch(
+          "https://paragraph.xyz/api/blogs/@kiwi-updates/subscribe",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ email }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error("Kiwi Updates subscription failed");
+        }
+      }
+
+      setStatus("success");
+      onSuccess();
+    } catch (err) {
+      console.error("Subscription error:", err);
+      toast.error("Failed to subscribe");
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div style={{ width: "100%", maxWidth: "320px", marginBottom: "3rem" }}>
+      <h1
+        style={{
+          fontFamily: "var(--font-family)",
+          fontSize: "24px",
+          fontWeight: "600",
+          marginBottom: "24px",
+        }}
+      >
+        Stay Updated
+      </h1>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Enter your email"
+          style={{
+            width: "100%",
+            padding: "12px",
+            marginBottom: "16px",
+            border: "var(--border-thin)",
+            borderRadius: "2px",
+            fontSize: "11pt",
+          }}
+          required
+        />
+
+        <div style={{ marginBottom: "24px" }}>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              marginBottom: "12px",
+              fontSize: "11pt",
+              color: "#666",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={subscribeToComments}
+              onChange={(e) => setSubscribeToComments(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Get notified about replies to your comments
+          </label>
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              fontSize: "11pt",
+              color: "#666",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={subscribeToNewsletter}
+              onChange={(e) => setSubscribeToNewsletter(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Subscribe to Kiwi Weekly
+          </label>
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              fontSize: "11pt",
+              color: "#666",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={subscribeToUpdates}
+              onChange={(e) => setSubscribeToUpdates(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Subscribe to Kiwi Updates
+          </label>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            type="submit"
+            disabled={status === "sending"}
+            style={{
+              padding: "8px 16px",
+              background: status === "sending" ? "#828282" : "black",
+              color: "white",
+              border: "none",
+              borderRadius: "2px",
+              cursor: "pointer",
+              fontSize: "11pt",
+            }}
+          >
+            {status === "sending" ? "Subscribing..." : "Subscribe"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+const ConnectedEmailSubscriptionForm = (props) => {
+  return (
+    <Connector {...props}>
+      <EmailSubscriptionForm {...props} />
+    </Connector>
+  );
+};
+
+export { ConnectedEmailSubscriptionForm };
+
+const NotificationButton = ({ onEnabled }) => {
+  const [permissionStatus, setPermissionStatus] = useState("default");
+
+  useEffect(() => {
+    const handlePermissionResult = (event) => {
+      setPermissionStatus(event.detail);
+      if (event.detail === "granted" && onEnabled) {
+        onEnabled();
+      }
+    };
+
+    window.addEventListener(
+      "notificationPermissionResult",
+      handlePermissionResult,
+    );
+    return () => {
+      window.removeEventListener(
+        "notificationPermissionResult",
+        handlePermissionResult,
+      );
+    };
+  }, [onEnabled]);
+
+  const handleNotificationRequest = () => {
+    if (window.requestIOSNotifications) {
+      window.requestIOSNotifications();
+    }
+  };
+
+  return (
+    <button
+      onClick={handleNotificationRequest}
+      style={{
+        padding: "6px 12px",
+        background: "black",
+        color: "white",
+        border: "var(--border)",
+        borderRadius: "2px",
+        cursor: "pointer",
+        fontSize: "10pt",
+      }}
+    >
+      {permissionStatus === "granted"
+        ? "Notifications Enabled"
+        : "Enable Notifications"}
+    </button>
+  );
+};
+
+const IOSAppLogin = (props) => {
+  const { allowlist, delegations, toast } = props;
+  const [isDrawerOpen, setIsDrawerOpen] = useState(true);
+  const [currentStep, setCurrentStep] = useState("login");
   const PasskeysLogin = RestoreDialogue(allowlist, delegations, toast);
+
+  const [shouldReload, setShouldReload] = useState(false);
+
+  const handleLoginSuccess = () => {
+    setShouldReload(true);
+    setCurrentStep("pushNotifications");
+  };
+
+  const handleSkip = () => {
+    if (currentStep === "pushNotifications") {
+      setCurrentStep("complete");
+    }
+  };
+
+  const handleClose = () => {
+    setIsDrawerOpen(false);
+    if (shouldReload) {
+      window.location.reload();
+    }
+  };
+
+  const renderContent = () => {
+    switch (currentStep) {
+      case "login":
+        return (
+          <>
+            <img
+              src="kiwi-icon.webp"
+              alt="Logo"
+              style={{
+                width: "64px",
+                height: "64px",
+                marginBottom: "16px",
+              }}
+            />
+            <h1
+              style={{
+                fontFamily: "var(--font-family)",
+                fontSize: "24px",
+                fontWeight: "600",
+                marginBottom: "24px",
+              }}
+            >
+              Welcome Back
+            </h1>
+            <div style={{ width: "100%", maxWidth: "320px" }}>
+              <PasskeysLogin callback={handleLoginSuccess} />
+              {window.location.protocol === "http:" && (
+                <button
+                  onClick={() => {
+                    setShouldReload(true);
+                    setCurrentStep("pushNotifications");
+                  }}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    color: "#666",
+                    fontSize: "9pt",
+                    padding: "12px 0",
+                    cursor: "pointer",
+                    width: "100%",
+                  }}
+                >
+                  Skip login (development only)
+                </button>
+              )}
+            </div>
+          </>
+        );
+
+      case "pushNotifications":
+        return (
+          <EmailSubscriptionForm
+            onSuccess={() => setCurrentStep("complete")}
+            onSkip={() => setCurrentStep("complete")}
+            allowlist={allowlist}
+            delegations={delegations}
+            toast={toast}
+          />
+        );
+
+      case "complete":
+        return (
+          <div
+            style={{ width: "100%", maxWidth: "320px", textAlign: "center" }}
+          >
+            <img
+              src="kiwi-icon.webp"
+              alt="Logo"
+              style={{
+                width: "64px",
+                height: "64px",
+                marginBottom: "16px",
+              }}
+            />
+            <h1
+              style={{
+                fontFamily: "var(--font-family)",
+                fontSize: "24px",
+                fontWeight: "600",
+                marginBottom: "24px",
+              }}
+            >
+              You're all set!
+            </h1>
+          </div>
+        );
+    }
+  };
 
   return (
     <>
@@ -37,7 +418,7 @@ const IOSAppLogin = ({ allowlist, delegations, toast }) => {
       <SwipeableDrawer
         anchor="bottom"
         open={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
+        onClose={handleClose}
         onOpen={() => setIsDrawerOpen(true)}
         disableBackdropTransition={!isIOS()}
         disableDiscovery={isIOS()}
@@ -52,20 +433,65 @@ const IOSAppLogin = ({ allowlist, delegations, toast }) => {
               alignItems: "center",
             }}
           >
-            <button
-              onClick={() => setIsDrawerOpen(false)}
+            <div
               style={{
-                border: "none",
-                background: "none",
-                fontSize: "16px",
-                fontWeight: "500",
-                color: "var(--full-contrast-color)",
-                cursor: "pointer",
-                padding: "8px 16px",
+                display: "flex",
+                justifyContent: "space-between",
+                width: "100%",
               }}
             >
-              Cancel
-            </button>
+              {currentStep !== "complete" && (
+                <button
+                  onClick={handleClose}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    fontSize: "16px",
+                    fontWeight: "500",
+                    color: "var(--full-contrast-color)",
+                    cursor: "pointer",
+                    padding: "8px 16px",
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+              {currentStep === "pushNotifications" && (
+                <button
+                  onClick={() => {
+                    handleSkip();
+                    handleClose();
+                  }}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    fontSize: "16px",
+                    fontWeight: "500",
+                    color: "var(--full-contrast-color)",
+                    cursor: "pointer",
+                    padding: "8px 16px",
+                  }}
+                >
+                  Skip
+                </button>
+              )}
+              {currentStep === "complete" && (
+                <button
+                  onClick={handleClose}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    fontSize: "16px",
+                    fontWeight: "500",
+                    color: "var(--full-contrast-color)",
+                    cursor: "pointer",
+                    padding: "8px 16px",
+                  }}
+                >
+                  Done
+                </button>
+              )}
+            </div>
           </div>
 
           <div
@@ -79,35 +505,7 @@ const IOSAppLogin = ({ allowlist, delegations, toast }) => {
               gap: "24px",
             }}
           >
-            <img
-              src="kiwi-icon.webp"
-              alt="Logo"
-              style={{
-                width: "64px",
-                height: "64px",
-                marginBottom: "16px",
-              }}
-            />
-
-            <h1
-              style={{
-                fontFamily: "var(--font-family)",
-                fontSize: "24px",
-                fontWeight: "600",
-                marginBottom: "24px",
-              }}
-            >
-              Welcome Back
-            </h1>
-
-            <div
-              style={{
-                width: "100%",
-                maxWidth: "320px",
-              }}
-            >
-              <PasskeysLogin />
-            </div>
+            {renderContent()}
           </div>
         </div>
       </SwipeableDrawer>
@@ -138,11 +536,14 @@ const Bell = (props) => {
   const link = isEligible
     ? `/activity?address=${address}${
         cacheBuster ? `&cacheBuster=${cacheBuster}` : ""
-      }`
+      }&lastUpdate=${lastUpdate}`
     : "/kiwipass-mint";
 
   const handleClick = () => {
     setIsFull(!isFull);
+    if(!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button !== 1) {
+      document.getElementById('spinner-overlay').style.display='block';
+    }
   };
 
   useEffect(() => {
@@ -152,7 +553,7 @@ const Bell = (props) => {
       setIsLoading(true);
 
       try {
-        const notifications = await fetchNotifications(address);
+        const notifications = await API.fetchNotifications(address);
         const localLastUpdate = parseInt(getCookie("lastUpdate"), 10);
         setReadNotifications(notifications.length);
 

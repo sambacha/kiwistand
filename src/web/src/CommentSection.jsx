@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
+import posthog from "posthog-js";
 import { formatDistanceToNowStrict } from "date-fns";
 import Linkify from "linkify-react";
 import { useAccount, WagmiConfig } from "wagmi";
@@ -11,6 +12,7 @@ import CommentInput from "./CommentInput.jsx";
 import * as API from "./API.mjs";
 import { getLocalAccount, isIOS, isRunningPWA } from "./session.mjs";
 import { resolveAvatar } from "./Avatar.jsx";
+import { dynamicPrefetch } from "./main.jsx";
 
 function ShareIcon(style) {
   return (
@@ -58,7 +60,7 @@ function truncateName(name) {
   return name.slice(0, maxLength) + "...";
 }
 
-const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
+export const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
   const [isReacting, setIsReacting] = useState(false);
   const [kiwis, setKiwis] = useState(
     comment.reactions?.find((r) => r.emoji === "🥝")?.reactors || [],
@@ -95,6 +97,21 @@ const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
   if (localAccount?.privateKey) {
     signer = new Wallet(localAccount.privateKey, provider);
   }
+  const [preResolvedAvatar, setPreResolvedAvatar] = useState(null);
+  useEffect(() => {
+    async function fetchAvatar() {
+      if (signer) {
+        const addr = await signer.getAddress();
+        const identityResolved = eligible(allowlist, delegations, addr);
+        if (identityResolved) {
+          const resolved = await resolveAvatar(identityResolved);
+          setPreResolvedAvatar(resolved);
+          dynamicPrefetch(resolved);
+        }
+      }
+    }
+    fetchAvatar();
+  }, [signer, allowlist, delegations]);
 
   const handleReaction = async (emoji) => {
     if (!signer) {
@@ -120,35 +137,49 @@ const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
         value,
       );
 
-      const response = await API.send(value, signature);
+      // Optimistically update UI with reaction immediately using pre-resolved avatar if available
+      const resolvedAvatar =
+        preResolvedAvatar || (await resolveAvatar(identity));
+      const existingReaction = comment.reactions.find(
+        (r) => r.emoji === emoji && Array.isArray(r.reactorProfiles),
+      );
+      if (existingReaction) {
+        existingReaction.reactorProfiles.push({
+          address: identity,
+          safeAvatar: resolvedAvatar,
+        });
+      } else {
+        comment.reactions.push({
+          emoji,
+          reactorProfiles: [{ address: identity, safeAvatar: resolvedAvatar }],
+        });
+      }
 
+      switch (emoji) {
+        case "🥝":
+          setKiwis([...kiwis, identity]);
+          break;
+        case "🔥":
+          setFires([...fires, identity]);
+          break;
+        case "👀":
+          setEyes([...eyes, identity]);
+          break;
+        case "💯":
+          setHundreds([...hundreds, identity]);
+          break;
+        case "🤭":
+          setLaughs([...laughs, identity]);
+          break;
+      }
+
+      // Send reaction in background
+      const response = await API.send(value, signature);
       if (response.status === "success") {
         toast.success("Reaction added!");
-
-        const avatar = await resolveAvatar(identity);
-        const newReaction = {
-          emoji,
-          reactorProfiles: [{ address: identity, safeAvatar: avatar }],
-        };
-        comment.reactions.push(newReaction);
-
-        switch (emoji) {
-          case "🥝":
-            setKiwis([...kiwis, identity]);
-            break;
-          case "🔥":
-            setFires([...fires, identity]);
-            break;
-          case "👀":
-            setEyes([...eyes, identity]);
-            break;
-          case "💯":
-            setHundreds([...hundreds, identity]);
-            break;
-          case "🤭":
-            setLaughs([...laughs, identity]);
-            break;
-        }
+        posthog.capture("emoji_reaction", {
+          emoji: emoji,
+        });
       } else {
         toast.error(response.details || "Failed to add reaction");
       }
@@ -160,7 +191,8 @@ const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
     }
   };
 
-  if (comment.identity.address === address) return;
+  // Don't allow reacting to your own comments, but do show reactions you've received
+  const isOwnComment = comment.identity.address === address;
   return (
     <div
       style={{
@@ -196,28 +228,30 @@ const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
             [],
         };
 
-        const disabled = isReacting || hasReacted;
+        const disabled = isReacting || hasReacted || isOwnComment;
 
-        if ((isntLoggedIn || hasReacted) && counts[emoji] === 0) return null;
+        // Show reaction if there are reactions to display
+        // Don't show empty reaction buttons on your own comments
+        if (counts[emoji] === 0 && (isntLoggedIn || hasReacted || isOwnComment)) return null;
 
         return (
           <button
             key={emoji}
             onClick={() => !disabled && handleReaction(emoji)}
-            disabled={isReacting || hasReacted || isntLoggedIn}
+            disabled={disabled || isntLoggedIn}
             style={{
               display: "inline-flex",
               alignItems: "center",
               padding: "4px 12px",
               backgroundColor:
-                hasReacted || isntLoggedIn ? "#f3f3f3" : "var(--bg-off-white)",
+                disabled || isntLoggedIn ? "#f3f3f3" : "var(--bg-off-white)",
               border:
-                hasReacted || isntLoggedIn
+                disabled || isntLoggedIn
                   ? "1px solid rgba(0,0,0,0)"
                   : "var(--border-thin)",
               borderRadius: "2px",
-              cursor: hasReacted || isntLoggedIn ? "default" : "pointer",
-              color: hasReacted || isntLoggedIn ? "black" : "auto",
+              cursor: disabled || isntLoggedIn ? "default" : "pointer",
+              color: disabled || isntLoggedIn ? "black" : "auto",
               fontSize: "10pt",
               WebkitAppearance: "none",
               opacity: 1,
@@ -227,22 +261,24 @@ const EmojiReaction = ({ comment, allowlist, delegations, toast }) => {
             <span style={{ marginRight: counts[emoji] > 0 ? "4px" : "0" }}>
               {emoji}
             </span>
-            {profiles[emoji].map((profile, i) => (
-              <img
-                key={i}
-                loading="lazy"
-                src={profile.safeAvatar}
-                alt="reactor"
-                style={{
-                  zIndex: i,
-                  width: i > 0 ? "13px" : "12px",
-                  height: i > 0 ? "13px" : "12px",
-                  borderRadius: "2px",
-                  border: i > 0 ? "1px solid #f3f3f3" : "1px solid #828282",
-                  marginLeft: i > 0 ? "-4px" : 0,
-                }}
-              />
-            ))}
+            {profiles[emoji]
+              .filter(profile => profile.safeAvatar)
+              .map((profile, i) => (
+                <img
+                  key={i}
+                  loading="lazy"
+                  src={profile.safeAvatar}
+                  alt="reactor"
+                  style={{
+                    zIndex: i,
+                    width: i > 0 ? "13px" : "12px",
+                    height: i > 0 ? "13px" : "12px",
+                    borderRadius: "2px",
+                    border: i > 0 ? "1px solid #f3f3f3" : "1px solid #828282",
+                    marginLeft: i > 0 ? "-4px" : 0,
+                  }}
+                />
+              ))}
           </button>
         );
       })}
@@ -469,6 +505,10 @@ const Comment = React.forwardRef(
             }}
             className="meta-link"
             href={`/upvotes?address=${comment.identity.address}`}
+            onClick={() =>
+              (document.getElementById("spinner-overlay").style.display =
+                "block")
+            }
           >
             {comment.identity.safeAvatar && (
               <img

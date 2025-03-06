@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 :root {
    --font-family: 'Inter', Verdana, Geneva, sans-serif;
    --background-color0: #f6f6ef;
@@ -445,8 +444,13 @@ body {
 .row-image {
   display: none !important;
 }
+/* Hide domain text in subtitle when showing mobile image */
+.content-row-elevated .story-subtitle .domain-text {
+  display: none;
+}
+
 /* mobile device */
- @media only screen and (min-width : 300px) and (max-width : 640px) {
+@media only screen and (min-width : 300px) and (max-width : 640px) {
     .scroll-margin-base {
       scroll-margin-top: 140px;
     }
@@ -787,6 +791,10 @@ body {
     .row-image {
       display: block !important;
     }
+    /* Always show domain in subtitle for desktop */
+    .story-subtitle .domain-text {
+      display: inline !important;
+    }
     .mobile-center {
       display: none !important;
     }
@@ -1021,6 +1029,11 @@ a.meta-link, span.meta-link {
 a.meta-link:hover, span.meta-link:hover {
   text-decoration: underline;
 }
+
+.meta-link.primary-action {
+  color: black;
+  font-weight: 500;
+}
 .selectable-link {
   user-select: auto;
 }
@@ -1048,6 +1061,29 @@ a.meta-link:hover, span.meta-link:hover {
   background-color: rgba(0, 0, 0, 0.2) !important;
 }
 
+@keyframes karma-float {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -30px);
+  }
+}
+
+.karma-animation {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-weight: bold;
+  font-size: 14px;
+  pointer-events: none;
+  z-index: 100;
+  text-shadow: 0px 0px 2px white;
+  animation: karma-float 0.7s ease-out forwards;
+}
  
 #top-bar {
   top: 0;
@@ -1097,4 +1133,38 @@ a.meta-link:hover, span.meta-link:hover {
 [contenteditable=true]:empty:before {
    content: attr(data-placeholder);
    color: #999;
+}
+@media only screen and (min-width: 641px) {
+  .desktop-search {
+    display: block !important;
+  }
+}
+@media only screen and (max-width: 640px) {
+  .desktop-search {
+    display: none !important;
+  }
+  #static-desktop-search {
+    display: none !important;
+  }
+}
+
+/* Spinner overlay styles */
+#spinner-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(255,255,255,0.7);
+  z-index: 9999;
+}
+#spinner-overlay::after {
+  content: "loading...";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.5rem;
+  color: black;
 }

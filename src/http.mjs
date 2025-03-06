@@ -1,18 +1,31 @@
 //@format
+
+// NOTE: Throughout this file we use Cloudflare-specific cache control headers:
+// - s-maxage: Controls Cloudflare CDN caching duration
+// - stale-while-revalidate: We implement a custom worker on news.kiwistand.com
+//   to handle stale-while-revalidate since Cloudflare doesn't support this natively
+
 import { env } from "process";
 import { readFile } from "fs/promises";
 import path, { basename } from "path";
+import cluster from "cluster";
+import os from "os";
 
 import morgan from "morgan";
 import express from "express";
 import cookieParser from "cookie-parser";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import { utils } from "ethers";
+import { handleFaucetRequest } from "./faucet.mjs";
 import htm from "htm";
 import "express-async-errors";
 import { sub } from "date-fns";
 import DOMPurify from "isomorphic-dompurify";
+import { getSlug } from "./utils.mjs";
 import ws from "ws";
-import { createServer } from "http";
+import https from "https";
+import fs from "fs";
+import { createServer as createHttpServer } from "http";
 import { FileSystemCache, getCacheKey } from "node-fetch-cache";
 
 import * as registry from "./chainstate/registry.mjs";
@@ -43,6 +56,7 @@ import community from "./views/community.mjs";
 import stats from "./views/stats.mjs";
 import users from "./views/users.mjs";
 import basics from "./views/basics.mjs";
+import search from "./views/search.mjs";
 import retention from "./views/retention.mjs";
 import * as activity from "./views/activity.mjs";
 import * as comments from "./views/comments.mjs";
@@ -58,6 +72,7 @@ import appOnboarding from "./views/app-onboarding.mjs";
 import appTestflight from "./views/app-testflight.mjs";
 import demonstration from "./views/demonstration.mjs";
 import notifications from "./views/notifications.mjs";
+import emailNotifications from "./views/email-notifications.mjs";
 import pwa from "./views/pwa.mjs";
 import pwaandroid from "./views/pwaandroid.mjs";
 import * as curation from "./views/curation.mjs";
@@ -77,11 +92,26 @@ import {
   getRandomIndex,
   getSubmission,
   trackOutbound,
+  trackImpression,
   getRecommendations,
+  getTimestamp,
+  setTimestamp,
 } from "./cache.mjs";
 
 const app = express();
-const server = createServer(app);
+let server;
+if (env.CUSTOM_PROTOCOL === "https://") {
+  const options = {
+    key: fs.readFileSync("certificates/key.pem"),
+    cert: fs.readFileSync("certificates/cert.pem"),
+    rejectUnauthorized: false,
+  };
+  server = https.createServer(options, app);
+} else {
+  server = createHttpServer(app);
+}
+
+let cachedFeed = null;
 
 app.set("etag", false);
 app.use((req, res, next) => {
@@ -99,7 +129,10 @@ app.use(
   express.static("src/public/assets", {
     setHeaders: (res, pathName) => {
       if (env.NODE_ENV === "production") {
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.setHeader(
+          "Cache-Control",
+          "public, max-age=604800, s-maxage=604800, immutable, stale-while-revalidate=2592000",
+        );
       }
     },
   }),
@@ -110,13 +143,44 @@ app.use(
     setHeaders: (res, pathName) => {
       if (env.NODE_ENV !== "production") return;
       if (!/\/assets\//.test(pathName)) {
-        res.setHeader("Cache-Control", "public, max-age=86400");
+        res.setHeader(
+          "Cache-Control",
+          "public, max-age=86400, s-maxage=604800, immutable, stale-while-revalidate=2592000",
+        );
       }
     },
   }),
 );
 app.use(express.json());
 app.use(cookieParser());
+
+// NOTE: We use s-maxage for Cloudflare CDN caching, while max-age controls browser caching
+app.get("/.well-known/apple-app-site-association", (req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader(
+    "Cache-Control",
+    "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
+  );
+  res.json({
+    webcredentials: {
+      apps: ["SKFAD6UPBF.attestate.Kiwi-News-iOS"],
+    },
+    applinks: {
+      apps: [],
+      details: [
+        {
+          appIDs: ["SKFAD6UPBF.attestate.Kiwi-News-iOS"],
+          components: [
+            {
+              "/": "/*",
+              comment: "Matches all URLs",
+            },
+          ],
+        },
+      ],
+    },
+  });
+});
 
 function loadTheme(req, res, next) {
   res.locals.theme = theme;
@@ -128,7 +192,7 @@ app.use(loadTheme);
 // NOTE: sendError and sendStatus are duplicated here (compare with
 // /src/api.mjs) because eventually we wanna rip apart the Kiwi News website
 // from the node software.
-function sendError(reply, code, message, details) {
+export function sendError(reply, code, message, details) {
   log(`http error: "${code}", "${message}", "${details}"`);
   return reply.status(code).json({
     status: "error",
@@ -138,7 +202,7 @@ function sendError(reply, code, message, details) {
   });
 }
 
-function sendStatus(reply, code, message, details, data) {
+export function sendStatus(reply, code, message, details, data) {
   const obj = {
     status: "success",
     code,
@@ -149,14 +213,181 @@ function sendStatus(reply, code, message, details, data) {
   return reply.status(code).json(obj);
 }
 
-export async function launch(trie, libp2p) {
-  const wss = new ws.Server({ noServer: true });
-  const clients = new Set();
+// Send an IPC message to all worker processes
+export function sendToCluster(message) {
+  if (!cluster.isPrimary) {
+    // Workers can't send to other workers directly
+    return;
+  }
+
+  log(`Sending IPC message to workers: ${message}`);
+
+  // Send to all workers
+  for (const id in cluster.workers) {
+    cluster.workers[id].send(message);
+  }
+}
+
+// Handle IPC messages from the primary process
+export function handleClusterMessage(trie, recompute) {
+  return (message) => {
+    if (message === "recompute-new-feed") {
+      log(`Worker ${process.pid} received recompute-new-feed message`);
+      recompute(trie).catch((err) => {
+        log(
+          `Error in worker ${
+            process.pid
+          } recomputing new feed: ${err.toString()}`,
+        );
+      });
+    }
+  };
+}
+
+export async function launch(trie, libp2p, isPrimary = true) {
+  // Set up IPC message handling for worker processes
+  if (!isPrimary && cluster.worker) {
+    // Listen for messages from the primary process
+    process.on("message", handleClusterMessage(trie, newAPI.recompute));
+    log(`Worker ${process.pid} ready to receive IPC messages`);
+  }
+
+  // Routes that can be handled by the worker cluster
+  const workerRoutes = [
+    "/friends",
+    "/kiwipass-mint",
+    "/api/v1/karma",
+    "/api/v1/feeds",
+    "/api/v1/stories",
+    "/gateway",
+    "/",
+    "/stories",
+    "/best",
+    "/community",
+    "/price",
+    "/retention",
+    "/users",
+    "/basics",
+    "/stats",
+    "/about",
+    "/passkeys",
+    "/app-onboarding",
+    "/app-testflight",
+    "/pwaandroid",
+    "/pwa",
+    "/notifications",
+    "/demonstration",
+    "/email-notifications",
+    "/invite",
+    "/indexing",
+    "/start",
+    "/settings",
+    "/why",
+    "/subscribe",
+    "/privacy-policy",
+    "/guidelines",
+    "/onboarding",
+    "/whattosubmit",
+    "/referral",
+    "/onboarding-reader",
+    "/onboarding-curator",
+    "/onboarding-submitter",
+    "/welcome",
+    "/kiwipass",
+    "/shortcut",
+    "/profile",
+    "/upvotes",
+    "/submit",
+  ];
+
+  try {
+    cachedFeed = await feed(trie, theme, 0, null, undefined, undefined);
+    log("Cached feed updated");
+  } catch (err) {
+    log("Failed to update cached feed: " + err);
+    cachedFeed = null;
+  }
+  (function updateCachedFeed() {
+    setTimeout(async () => {
+      const startTime = Date.now();
+      try {
+        const newFeed = await feed(trie, theme, 0, null, undefined, undefined);
+        cachedFeed = newFeed;
+        const elapsed = Date.now() - startTime;
+        log(`Cached feed updated in ${elapsed}ms`);
+      } catch (err) {
+        log("Failed to update cached feed: " + err);
+        // Retain existing cachedFeed to avoid response delays.
+      } finally {
+        updateCachedFeed();
+      }
+    }, 30000);
+  })();
 
   app.use((err, req, res, next) => {
     log(`Express error: "${err.message}", "${err.stack}"`);
     res.status(500).send("Internal Server Error");
   });
+
+  // Set up proxy middleware in primary process
+  if (isPrimary && cluster.isPrimary) {
+    log("Setting up worker proxy middleware");
+
+    // Create regex patterns for worker routes
+    const workerPathRegex = new RegExp(`^(${workerRoutes.join("|")})`, "i");
+
+    // Set up ports for each worker
+    const workers = [];
+    const startPort = parseInt(env.HTTP_PORT) + 1;
+
+    for (let i = 0; i < (Number(env.WORKER_COUNT) || os.cpus().length); i++) {
+      workers.push(`http://localhost:${startPort + i}`);
+    }
+
+    // Simple round-robin load balancer
+    let currentWorker = 0;
+
+    // Add proxy middleware for routes that should go to workers
+    app.use((req, res, next) => {
+      if (
+        (req.path === "/new" && req.query.cached !== "true") ||
+        req.path.slice(1).endsWith(".eth")
+      ) {
+        return next();
+      }
+
+      if (workerPathRegex.test(req.path)) {
+        // Get next worker in round-robin fashion
+        const target = workers[currentWorker];
+        currentWorker = (currentWorker + 1) % workers.length;
+
+        log(`Proxying ${req.method} ${req.url} to worker at ${target}`);
+
+        const proxy = createProxyMiddleware({
+          target,
+          changeOrigin: true,
+          ws: false,
+          logLevel: "warn",
+          pathRewrite: (path, req) => path, // keep path unchanged
+        });
+
+        return proxy(req, res, next);
+      }
+
+      // If not a worker route, continue with normal processing
+      next();
+    });
+  }
+  // If we're a worker, adjust the port
+  else if (!isPrimary) {
+    // Calculate worker's port offset
+    const workerIndex = cluster.worker.id - 1;
+    const workerPort = parseInt(env.HTTP_PORT) + 1 + workerIndex;
+
+    // Override HTTP_PORT for this worker
+    env.HTTP_PORT = workerPort;
+    log(`Worker ${process.pid} using port ${workerPort}`);
+  }
 
   // NOTE: If you're reading this as an external contributor, yes the
   // fingerprint.mjs file isn't distributed along with the other code because
@@ -208,6 +439,22 @@ export async function launch(trie, libp2p) {
     const hash = fingerprint.generate(request);
     const cleanUrl = removeReferrerParams(url);
     trackOutbound(cleanUrl, hash);
+    return reply.status(204).send();
+  });
+
+  app.post("/impression", async (request, reply) => {
+    reply.header("Cache-Control", "no-cache");
+    const { url } = request.query;
+    if (!url) {
+      return reply.status(400).send("URL parameter is required");
+    }
+    if (!fingerprint) {
+      return reply.status(204).send();
+    }
+
+    const hash = fingerprint.generate(request);
+    const cleanUrl = removeReferrerParams(url);
+    trackImpression(cleanUrl, hash);
     return reply.status(204).send();
   });
   app.get("/outbound", async (request, reply) => {
@@ -513,7 +760,10 @@ export async function launch(trie, libp2p) {
 
     let data;
     try {
-      data = await metadata(request.query.url);
+      data = await metadata(
+        request.query.url,
+        request.query.generateTitle === "true",
+      );
     } catch (err) {
       log(`parser.metadata failure: ${err.stack}`);
       const code = 500;
@@ -558,9 +808,10 @@ export async function launch(trie, libp2p) {
     const code = 200;
     const httpMessage = "OK";
     const details = `Karma`;
+    // Keep cache time low but allow longer stale-while-revalidate for better performance
     reply.header(
       "Cache-Control",
-      "public, s-maxage=86400, max-age=86400, stale-while-revalidate=259200",
+      "public, s-maxage=300, max-age=60, stale-while-revalidate=86400",
     );
     return sendStatus(reply, code, httpMessage, details, {
       address,
@@ -600,7 +851,7 @@ export async function launch(trie, libp2p) {
       }
       reply.header(
         "Cache-Control",
-        "public, s-maxage=300, max-age=300,  must-revalidate, stale-while-revalidate=30",
+        "public, s-maxage=20, max-age=20,  must-revalidate, stale-while-revalidate=86400",
       );
       stories = results.stories;
     } else if (request.params.name === "new") {
@@ -701,7 +952,7 @@ export async function launch(trie, libp2p) {
 
     reply.header(
       "Cache-Control",
-      "public, s-maxage=10, max-age=10, stale-while-revalidate=31536000",
+      "public, s-maxage=300, max-age=300, stale-while-revalidate=31536000",
     );
     const code = 200;
     const httpMessage = "OK";
@@ -748,34 +999,36 @@ export async function launch(trie, libp2p) {
 
     let content;
     try {
-      content = await feed(
-        trie,
-        reply.locals.theme,
-        page,
-        DOMPurify.sanitize(request.query.domain),
-        identity,
-        hash,
-      );
+      if (
+        !request.query.page &&
+        !request.query.domain &&
+        !request.query.identity &&
+        !request.query.hash &&
+        request.query.custom !== "true" &&
+        cachedFeed
+      ) {
+        content = cachedFeed;
+      } else {
+        content = await feed(
+          trie,
+          reply.locals.theme,
+          page,
+          DOMPurify.sanitize(request.query.domain),
+          identity,
+          hash,
+        );
+      }
     } catch (err) {
       log(`Error in /: ${err.stack}`);
       return reply.status(500).send("Internal Server Error");
     }
     reply.header(
       "Cache-Control",
-      "public, s-maxage=5, max-age=5, stale-while-revalidate=3600",
+      "public, s-maxage=20, max-age=20, stale-while-revalidate=86400",
     );
     return reply.status(200).type("text/html").send(content);
   });
   app.get("/stories/:slug?", async (request, reply) => {
-    if (request.params.slug) {
-      // NOTE: The slug is used to make the story URL more human readable, at
-      // the same time though, the slug is really just cosmetical as the index
-      // always informs about the actual origin of a domain
-      reply.header("Cache-Control", "public, max-age=31536000, immutable");
-      const queryParams = new URLSearchParams(request.query).toString();
-      return reply.redirect(`/stories?${queryParams}`);
-    }
-
     let referral;
     try {
       referral = utils.getAddress(request.query.referral);
@@ -786,6 +1039,14 @@ export async function launch(trie, libp2p) {
       submission = await generateStory(request.query.index);
     } catch (err) {
       return reply.status(404).type("text/plain").send(err.message);
+    }
+
+    const expectedSlug = getSlug(submission.title);
+    if (request.params.slug !== expectedSlug) {
+      const qp = new URLSearchParams(request.query);
+      qp.delete("t");
+      const queryParams = qp.toString();
+      return reply.redirect(308, `/stories/${expectedSlug}?${queryParams}`);
     }
 
     const hexIndex = request.query.index.substring(2);
@@ -824,7 +1085,7 @@ export async function launch(trie, libp2p) {
     if (request.query.cached) {
       reply.header(
         "Cache-Control",
-        "public, s-maxage=1, max-age=1, stale-while-revalidate=5",
+        "public, s-maxage=30, max-age=30, stale-while-revalidate=86400",
       );
     } else {
       reply.header("Cache-Control", "no-cache");
@@ -868,14 +1129,12 @@ export async function launch(trie, libp2p) {
     return reply.status(200).type("text/html").send(content);
   });
   app.get("/community", async (request, reply) => {
-    const content = await community(
-      trie,
-      reply.locals.theme,
-      request.query,
-      DOMPurify.sanitize(request.cookies.identity),
-    );
+    const content = await community(trie, reply.locals.theme, request.query);
 
-    reply.header("Cache-Control", "private, must-revalidate");
+    reply.header(
+      "Cache-Control",
+      "public, s-maxage=86400, max-age=86400, stale-while-revalidate=604800",
+    );
     return reply.status(200).type("text/html").send(content);
   });
   app.get("/price", async (request, reply) => {
@@ -937,7 +1196,7 @@ export async function launch(trie, libp2p) {
     const content = await appOnboarding(reply.locals.theme);
 
     reply.header(
-      "Cache-Control", 
+      "Cache-Control",
       "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
     );
     return reply.status(200).type("text/html").send(content);
@@ -947,7 +1206,7 @@ export async function launch(trie, libp2p) {
     const content = await appTestflight(reply.locals.theme);
 
     reply.header(
-      "Cache-Control", 
+      "Cache-Control",
       "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
     );
     return reply.status(200).type("text/html").send(content);
@@ -978,6 +1237,16 @@ export async function launch(trie, libp2p) {
       "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
     );
     return reply.status(200).type("text/html").send(content);
+  });
+  app.get("/email-notifications", async (request, reply) => {
+    reply.header(
+      "Cache-Control",
+      "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
+    );
+    return reply
+      .status(200)
+      .type("text/html")
+      .send(await emailNotifications(reply.locals.theme));
   });
   app.get("/invite", async (request, reply) => {
     const content = await invite(reply.locals.theme);
@@ -1041,14 +1310,24 @@ export async function launch(trie, libp2p) {
     return reply.status(200).type("text/html").send(content);
   });
   app.get("/api/v1/activity", async (request, reply) => {
-    let data;
+    if (!request.query.address) {
+      const code = 400;
+      const httpMessage = "Bad Request";
+      return sendError(
+        reply,
+        code,
+        httpMessage,
+        "Address query parameter required",
+      );
+    }
 
+    let data;
     const skipDetails = true;
     try {
       data = await activity.data(
         trie,
-        DOMPurify.sanitize(request.cookies.identity || request.query.address),
-        parseInt(request.cookies.lastUpdate, 10),
+        DOMPurify.sanitize(request.query.address),
+        parseInt(request.query.lastUpdate, 10),
         skipDetails,
       );
     } catch (err) {
@@ -1063,30 +1342,68 @@ export async function launch(trie, libp2p) {
 
     reply.header(
       "Cache-Control",
-      "public, maxage=10, s-maxage=10, stale-while-revalidate=3600",
+      "public, s-maxage=5, max-age=0, stale-while-revalidate=3600",
     );
     return sendStatus(reply, code, httpMessage, details, {
       notifications: data.notifications,
       lastServerValue: data.latestValue,
     });
   });
+
   app.get("/activity", async (request, reply) => {
+    // Query param version - cacheable, no cookies
+    if (request.query.address) {
+      let data;
+      try {
+        data = await activity.data(
+          trie,
+          DOMPurify.sanitize(request.query.address),
+          parseInt(request.query.lastUpdate, 10),
+        );
+      } catch (err) {
+        return reply.status(400).type("text/plain").send(err.toString());
+      }
+
+      const content = await activity.page(
+        reply.locals.theme,
+        DOMPurify.sanitize(request.query.address),
+        data.notifications,
+        parseInt(request.query.lastUpdate, 10),
+        true, // isQueryParamVersion
+      );
+
+      reply.header(
+        "Cache-Control",
+        "public, s-maxage=5, max-age=0, stale-while-revalidate=3600",
+      );
+      return reply.status(200).type("text/html").send(content);
+    }
+
+    // Cookie version - not cacheable
+    const address = request.cookies.identity;
+    if (!address) {
+      return reply.redirect(301, `/gateway`);
+    }
+
     let data;
     try {
       data = await activity.data(
         trie,
-        DOMPurify.sanitize(request.cookies.identity || request.query.address),
+        DOMPurify.sanitize(address),
         parseInt(request.cookies.lastUpdate, 10),
       );
     } catch (err) {
       return reply.status(400).type("text/plain").send(err.toString());
     }
+
     const content = await activity.page(
       reply.locals.theme,
-      DOMPurify.sanitize(request.cookies.identity || request.query.address),
+      DOMPurify.sanitize(address),
       data.notifications,
       parseInt(request.cookies.lastUpdate, 10),
+      false,
     );
+
     if (data && data.lastUpdate) {
       reply.cookie("lastUpdate", data.lastUpdate, {
         maxAge: 60 * 60 * 24 * 7 * 1000,
@@ -1277,9 +1594,9 @@ export async function launch(trie, libp2p) {
     if (profile && profile.ens) {
       reply.header(
         "Cache-Control",
-        "public, s-maxage=86400, max-age=86400, stale-while-revalidate=86400",
+        "public, s-maxage=86400, max-age=86400, stale-while-revalidate=259200",
       );
-      return reply.redirect(301, `/${profile.ens}`);
+      return reply.redirect(308, `/${profile.ens}`);
     }
 
     const content = await getProfile(
@@ -1292,19 +1609,22 @@ export async function launch(trie, libp2p) {
     );
 
     if (request.query.mode === "new") {
+      // For "new" mode, use shorter cache time but longer stale period
       reply.header(
         "Cache-Control",
-        "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
+        "public, s-maxage=3600, max-age=1800, stale-while-revalidate=259200",
       );
     } else if (!request.query.mode || request.query.mode == "top") {
+      // For "top" mode, we can cache longer with a very long stale period
       reply.header(
         "Cache-Control",
-        "public, s-maxage=86400, max-age=86400, stale-while-revalidate=86400",
+        "public, s-maxage=43200, max-age=21600, stale-while-revalidate=432000",
       );
     } else {
+      // Fallback for any other modes
       reply.header(
         "Cache-Control",
-        "public, s-maxage=3600, max-age=3600, stale-while-revalidate=60",
+        "public, s-maxage=3600, max-age=1800, stale-while-revalidate=86400",
       );
     }
 
@@ -1370,27 +1690,34 @@ export async function launch(trie, libp2p) {
       return next(err);
     }
 
-    reply.header(
-      "Cache-Control",
-      "public, s-maxage=86400, max-age=86400, stale-while-revalidate=600000",
-    );
+    // For ENS profiles, use similar caching strategy as upvotes but with longer max-age
+    if (request.query.mode === "new") {
+      reply.header(
+        "Cache-Control",
+        "public, s-maxage=7200, max-age=3600, stale-while-revalidate=259200",
+      );
+    } else {
+      reply.header(
+        "Cache-Control",
+        "public, s-maxage=43200, max-age=21600, stale-while-revalidate=432000",
+      );
+    }
     return reply.status(200).type("text/html").send(content);
   });
 
-  wss.on("connection", (ws) => {
-    clients.add(ws);
-
-    ws.on("close", () => {
-      clients.delete(ws);
-    });
+  app.get("/search", async (request, reply) => {
+    const query = request.query.q || "";
+    const content = await search(reply.locals.theme, query);
+    reply.header("Cache-Control", "no-cache");
+    return reply.status(200).type("text/html").send(content);
   });
 
-  server.on("upgrade", (request, socket, head) => {
-    wss.handleUpgrade(request, socket, head, (socket) => {
-      wss.emit("connection", socket, request);
-    });
+  app.post("/api/v1/faucet", async (request, reply) => {
+    reply.header("Cache-Control", "no-cache");
+    return handleFaucetRequest(request, reply);
   });
+
   server.listen(env.HTTP_PORT, () =>
-    log(`Launched HTTP server at port "${env.HTTP_PORT}"`),
+    log(`Launched HTTPS server at PORT: ${env.HTTP_PORT}`),
   );
 }

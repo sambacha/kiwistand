@@ -24,7 +24,8 @@ import {
 
 import { getLocalAccount } from "./session.mjs";
 import theme from "./theme.jsx";
-import { fetchPrice, fetchLeaderboard } from "./API.mjs";
+import posthog from "posthog-js";
+import { fetchPrice, fetchLeaderboard, requestFaucet } from "./API.mjs";
 import { getProvider, useProvider, client, chains } from "./client.mjs";
 
 export async function prepare(key) {
@@ -71,13 +72,6 @@ export async function prepare(key) {
   }
   if (!preferredChainId) {
     let error = `Need at least ${formatEther(price)} ETH on Optimism`;
-
-    if (balance.base > price) {
-      error = `Bridge:${base.id}:${price}`;
-    }
-    if (balance.arbitrum > price) {
-      error = `Bridge:${arbitrum.id}:${price}`;
-    }
     throw new Error(error);
   }
 
@@ -181,6 +175,11 @@ const BuyButton = (props) => {
   const { switchNetwork } = useSwitchNetwork();
   const { discountEligible, allowlist, delegations, toast } = props;
   const from = useAccount();
+  useEffect(() => {
+    if (from && from.address) {
+      posthog.identify(from.address);
+    }
+  }, [from]);
   const provider = useProvider();
   const [key, setKey] = useState(null);
   const [payload, setPayload] = useState(null);
@@ -218,28 +217,112 @@ const BuyButton = (props) => {
 
   const [config, setConfig] = useState(null);
   const [error, setError] = useState(null);
+  const [isFundingInProgress, setIsFundingInProgress] = useState(false);
+  const [faucetRequested, setFaucetRequested] = useState(false);
+
+  useEffect(() => {
+    let timeoutId;
+
+    const checkBalance = async () => {
+      if (!isFundingInProgress || !from.address) return;
+
+      try {
+        // Check the balance on Optimism
+        const provider = getProvider({ chainId: optimism.id });
+        const balance = await provider.getBalance(from.address);
+
+        if (balance > 0) {
+          // We have a balance, try to prepare the config
+          try {
+            const newConfig = await prepare(key);
+            if (newConfig) {
+              // Only show toast after successful prepare
+              toast.success(`We've just sent you some ETH to cover your transaction fees!`);
+              setConfig(newConfig);
+              setError(null);
+              setIsFundingInProgress(false);
+              return;
+            }
+          } catch (err) {
+            // If we get a "Need at least" error, the balance isn't enough yet
+            if (err.message.includes("Need at least")) {
+              console.log("Balance found but not enough yet, will retry");
+            } else {
+              console.log("Error during prepare:", err.message);
+            }
+          }
+        }
+      } catch (err) {
+        console.log("Error checking balance:", err.message);
+      }
+
+      // Continue polling
+      timeoutId = setTimeout(checkBalance, 500);
+    };
+
+    if (isFundingInProgress && from.address) {
+      checkBalance();
+    }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [isFundingInProgress, from.address, key]);
+
   useEffect(() => {
     const generate = async () => {
-      if (!key || isEligible) {
-        return;
-      }
+      if (!key || isEligible) return;
 
-      let config;
+      setConfig(null);
+
       try {
-        setConfig(null);
-        config = await prepare(key);
+        if (!chain) {
+          setError(new Error("Waiting for network connection..."));
+          return;
+        }
+        
+        const config = await prepare(key);
+        setConfig(config);
+        setError(null);
+        return;
       } catch (err) {
-        console.log("setting error", err.message, err.stack);
+        console.log("setting error", err.message);
         setError(err);
-        setConfig(null);
-      }
-      if (!config) return;
 
-      setConfig(config);
-      setError(null);
+        if (
+          !err.message.includes("Need at least") ||
+          !from.address ||
+          faucetRequested ||
+          isFundingInProgress
+        ) {
+          return;
+        }
+
+        setIsFundingInProgress(true);
+        setFaucetRequested(true);
+
+        console.log("Requesting funds from faucet for:", from.address);
+        const result = await requestFaucet(from.address);
+
+        if (result.status === "success") {
+          console.log("Faucet request successful:", result.details);
+          // Keep funding in progress for all success cases
+        } else {
+          console.error("Faucet request failed:", result.message);
+          setIsFundingInProgress(false);
+        }
+      }
     };
+
     generate();
-  }, [key, chain.id, discountEligible]);
+  }, [
+    key,
+    chain?.id,
+    discountEligible,
+    from.address,
+    faucetRequested,
+    isFundingInProgress,
+  ]);
 
   if (isEligible) {
     return (
@@ -317,47 +400,14 @@ const BuyButton = (props) => {
       (error.toString().includes("insufficient funds") ||
         error.code === -32603 ||
         error.code === "INSUFFICIENT_FUNDS")) ||
-    (error && error.toString().includes("Need at least")) ||
-    (error && error.toString().includes("Bridge:"))
+    (error && error.toString().includes("Need at least"))
   ) {
-    let button = (
+    // Show a message indicating we're getting the user ready
+    const button = (
       <button className="buy-button" disabled>
-        {error.message}
+        Getting you ready...
       </button>
     );
-    const ETHSymbol = "0x0000000000000000000000000000000000000000";
-    let link = `https://jumper.exchange/?toChain=10&toToken=${ETHSymbol}`;
-
-    const match = error.toString().match(/Bridge:(\w+):(\d+)/);
-    if (match) {
-      let [, fromChain, price] = match;
-      fromChain = parseInt(fromChain, 10);
-
-      let chainName = "";
-      if (fromChain === base.id) {
-        chainName += "from Base";
-      } else if (fromChain === arbitrum.id) {
-        chainName += "from Arbitrum";
-      }
-
-      const gasReserve = 1000000000000000n;
-      const fromAmount = BigInt(price) + gasReserve;
-      link += `&fromAmount=${formatEther(
-        fromAmount,
-      )}&fromChain=${fromChain}&fromToken=${ETHSymbol}`;
-      button = (
-        <>
-          <a href={link} target="_blank">
-            <button className="buy-button">
-              Bridge ETH {chainName} to Optimism (Jumper)
-            </button>
-          </a>
-          <p>
-            Once you're done bridging, <b>come back and reload this page</b>
-          </p>
-        </>
-      );
-    }
 
     return (
       <div
@@ -372,6 +422,26 @@ const BuyButton = (props) => {
       </div>
     );
   }
+  if (isFundingInProgress) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          flexDirection: "column",
+        }}
+      >
+        <button className="buy-button" disabled>
+          Getting you ready...
+        </button>
+        <p style={{ marginTop: "10px", fontSize: "14px" }}>
+          Please wait a moment while we prepare your account
+        </p>
+      </div>
+    );
+  }
+
   if (error) {
     return (
       <div>
@@ -411,20 +481,21 @@ const Button = (props) => {
     // is canceled by the user.
     if (isSuccess && data.hash !== "null") {
       setLocalStorageKey(signer.privateKey);
+      posthog.capture("user_signed_up", {
+        address: from.address,
+        transactionHash: data.hash,
+      });
+      // Removed Google Analytics conversion tracking for onboarding
       window.location.href = `/indexing?address=${from.address}&transactionHash=${data.hash}`;
     }
   }, [isSuccess]);
 
   if (isSuccess && data.hash !== "null") {
-    const etherscan =
-      chainId === mainnet.id ? "etherscan.io" : "optimistic.etherscan.io";
     return (
       <div>
-        <a target="_blank" href={`https://${etherscan}/tx/${data.hash}`}>
-          <button className="buy-button">
-            Thanks for joining! (view on Etherscan)
-          </button>
-        </a>
+        <button className="buy-button" disabled>
+          Success! Redirecting...
+        </button>
       </div>
     );
   }

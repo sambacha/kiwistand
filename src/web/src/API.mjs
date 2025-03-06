@@ -78,7 +78,10 @@ export async function send(
 }
 
 export async function fetchNotifications(address) {
-  const url = getApiUrl(`/api/v1/activity?address=${address}`);
+  const lastUpdate = parseInt(getCookie("lastUpdate"), 10) || 0;
+  const url = getApiUrl(
+    `/api/v1/activity?address=${address}&lastUpdate=${lastUpdate}`,
+  );
 
   const response = await fetch(url, {
     method: "GET",
@@ -92,15 +95,19 @@ export async function fetchNotifications(address) {
     return [];
   }
 
-  const lastUpdate = parseInt(getCookie("lastUpdate"), 10);
-  if (
-    (data &&
-      data.data &&
-      data.data.lastServerValue &&
-      lastUpdate <= parseInt(data.data.lastServerValue, 10)) ||
-    (!lastUpdate && data && data.data && data.data.lastServerValue)
+  // Always set lastUpdate cookie on /activity page
+  if (window.location.pathname === '/activity' && data?.data?.notifications?.length > 0) {
+    const latestNotification = data.data.notifications[0];
+    const timestamp = latestNotification.timestamp;
+    console.log("Setting lastUpdate on activity page to:", timestamp);
+    setCookie("lastUpdate", timestamp);
+  } else if (
+    (data?.data?.lastServerValue && lastUpdate <= parseInt(data.data.lastServerValue, 10)) ||
+    (!lastUpdate && data?.data?.lastServerValue)
   ) {
-    setCookie("lastUpdate", parseInt(data.data.lastServerValue, 10));
+    const value = parseInt(data.data.lastServerValue, 10);
+    console.log("Setting lastUpdate in browser to:", value);
+    setCookie("lastUpdate", value);
   }
 
   return data.data.notifications;
@@ -187,6 +194,23 @@ export async function fetchLeaderboard() {
   } catch (err) {
     console.error(err);
     return null;
+  }
+}
+
+export async function requestFaucet(address) {
+  try {
+    const response = await fetch('/api/v1/faucet', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ address }),
+    });
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Error requesting from faucet:', error);
+    return { status: 'error', message: error.message };
   }
 }
 

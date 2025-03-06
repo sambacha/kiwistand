@@ -24,6 +24,7 @@ import * as store from "../store.mjs";
 import * as id from "../id.mjs";
 import * as moderation from "./moderation.mjs";
 import cache, {
+  countImpressions,
   countOutbounds,
   getLastComment,
   getSubmission,
@@ -43,274 +44,9 @@ const formatedHolders = holders.map((a) => ethers.utils.getAddress(a));
 
 const html = htm.bind(vhtml);
 
-const ContestBanner = (stories) => html`
-  <div style="width: 100%; margin: 16px 0; font-family: var(--font-family);">
-    <div
-      style="border: var(--border-thin); border-right: none; border-left: none;"
-    >
-      <!-- Header -->
-      <div
-        onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'"
-        style="padding: 16px; background: #F6F6EF; cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-      >
-        <div style="display: flex; align-items: center; gap: 12px">
-          <div style="width: 16px; height: 16px; background: #8a63d2;"></div>
-          <span style="color: black; font-size: 14px"
-            >"The Future of Farcaster" Contest</span
-          >
-        </div>
-        <div
-          style="display: flex; align-items: center; gap: 12px; justify-content: flex-end"
-        >
-          ${stories && stories.length > 0
-            ? html`<div
-                class="contest-entries"
-                style="border: var(--border-thin); padding: 4px 12px; border-radius: 4px;"
-              >
-                <span style="color: black; font-size: 12px"
-                  >${stories.length} entries</span
-                >
-              </div>`
-            : ""}
-          <!-- Caret Icon -->
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 256 256"
-          >
-            <polyline
-              points="208 96 128 176 48 96"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="16"
-            />
-          </svg>
-        </div>
-      </div>
-
-      <!-- Expandable Content -->
-      <div
-        style="display: none; background: white; border-top: var(--border-thin);"
-      >
-        <!-- Key Info Grid -->
-        <div
-          style="display: grid; grid-template-columns: 1fr 1fr; border-bottom: var(--border-thin);"
-        >
-          <div
-            style="padding: 16px; display: flex; align-items: center; gap: 8px; border-right: var(--border-thin)"
-          >
-            <!-- Calendar Icon -->
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="14"
-              height="14"
-              viewBox="0 0 256 256"
-              style="color: #828282"
-            >
-              <rect width="256" height="256" fill="none" />
-              <rect
-                x="40"
-                y="40"
-                width="176"
-                height="176"
-                rx="8"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-              <line
-                x1="176"
-                y1="24"
-                x2="176"
-                y2="56"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-              <line
-                x1="80"
-                y1="24"
-                x2="80"
-                y2="56"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-              <line
-                x1="40"
-                y1="88"
-                x2="216"
-                y2="88"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-            </svg>
-            <div>
-              <div style="color: black; font-size: 12px">
-                Jan 20 - Feb 10, 2025
-              </div>
-              <div style="color: #828282; font-size: 10px">
-                Submissions period
-              </div>
-            </div>
-          </div>
-          <div
-            style="padding: 16px; display: flex; align-items: center; gap: 8px"
-          >
-            <!-- Trophy Icon -->
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="14"
-              height="14"
-              viewBox="0 0 256 256"
-              style="color: #828282"
-            >
-              <path
-                d="M58,128H48A32,32,0,0,1,16,96V80a8,8,0,0,1,8-8H56"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-              <path
-                d="M198,128h10a32,32,0,0,0,32-32V80a8,8,0,0,0-8-8H200"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-              <path
-                d="M56,48H200v63.1c0,39.7-31.75,72.6-71.45,72.9A72,72,0,0,1,56,112Z"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="16"
-              />
-            </svg>
-            <div>
-              <div style="color: black; font-size: 12px">Prize Pool: 2 ETH</div>
-              <div style="color: #828282; font-size: 10px">
-                <span>Sponsored by </span>
-                <a
-                  href="https://purple.construction/"
-                  target="_blank"
-                  style="color: #8a63d2; text-decoration: none"
-                  >Purple</a
-                >
-              </div>
-            </div>
-          </div>
-        </div>
-        <h4
-          style="margin: 24px 0 12px 16px ; font-size: 14px; color: #828282; font-weight: normal"
-        >
-          Submissions
-        </h4>
-        <table border="0" cellpadding="0" cellspacing="0" bgcolor="#f8f8f7">
-          ${stories}
-        </table>
-        <div style="padding: 16px">
-          <!-- Writing Prompts -->
-          <div style="margin-bottom: 24px">
-            <h4
-              style="margin: 0 0 12px 0; font-size: 14px; color: #828282; font-weight: normal"
-            >
-              Writing Prompts
-            </h4>
-            <div style="display: flex; flex-direction: column; gap: 8px">
-              ${[
-                "What updates, tweaks, or features could Farcaster clients do to become better for OGs and newcomers?",
-                "Which Farcaster frontier—agents, games, mini-apps, alt clients, memecoins—has the highest potential to grow the ecosystem?",
-                "How can crypto social legos create experiences that can't be found on web2 social networks?",
-                "How can Farcaster amp up its marketing and growth activities to bring more new users?",
-                "How could Farcaster go big without losing its soul?",
-              ].map(
-                (prompt) => html`
-                  <div
-                    style="padding: 12px; background: #F6F6EF; border: var(--border-thin);"
-                  >
-                    <span style="color: black; font-size: 12px">${prompt}</span>
-                  </div>
-                `,
-              )}
-            </div>
-          </div>
-
-          <!-- How to Participate -->
-          <div style="margin-bottom: 24px">
-            <h4
-              style="margin: 0 0 12px 0; font-size: 14px; color: #828282; font-weight: normal"
-            >
-              How to Participate
-            </h4>
-            <div style="display: flex; flex-direction: column; gap: 8px">
-              <div
-                style="padding: 12px; background: #F6F6EF; border: var(--border-thin);"
-              >
-                <span style="font-size: 12px; color: black;"
-                  >1. Write on any platform (Farcaster, Paragraph, Mirror,
-                  etc.)</span
-                >
-              </div>
-              <div
-                style="padding: 12px; background: #F6F6EF; border: var(--border-thin);"
-              >
-                <span style="font-size: 12px; color: black;"
-                  >2. Submit your essay to Kiwi</span
-                >
-              </div>
-              <div
-                style="padding: 12px; background: #F6F6EF; border: var(--border-thin);"
-              >
-                <span style="font-size: 12px; color: black;"
-                  >3. Share on Farcaster (@kiwi & @purple) and X (@KiwiNewsHQ)
-                  for extra distribution</span
-                >
-              </div>
-            </div>
-          </div>
-
-          <!-- Action Buttons -->
-          <div style="display: flex; justify-content: flex-end; gap: 12px">
-            <a
-              href="https://t.me/+4AgHHzYl5QpmMjc8"
-              target="_blank"
-              style="text-decoration: none; padding: 8px 16px; background: rgba(0,0,0,0.2); color: black; font-size: 14px"
-            >
-              Join Writers Chat
-            </a>
-            <a
-              href="https://paragraph.xyz/@kiwi-updates/farcaster-2026-writing-contest"
-              target="_blank"
-              style="text-decoration: none; padding: 8px 16px; background: black; color: white; font-size: 14px"
-            >
-              Learn More
-            </a>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-`;
-
 // NOTE: Only set this date in synchronicity with the src/launch.mjs date!!
 const cutoffDate = new Date("2025-01-15");
-const thresholdKarma = 3;
+const thresholdKarma = 5;
 export function identityClassifier(upvoter) {
   let balance = 0;
 
@@ -384,35 +120,6 @@ export async function getNeynarScore(address) {
   }
 
   return score;
-}
-
-export async function getContestStories() {
-  const sheetName = "contest";
-
-  let result;
-  try {
-    result = await curation.getSheet(sheetName);
-  } catch (err) {
-    log(`Error getting contest submissions ${err.stack}`);
-    return [];
-  }
-
-  const submissions = [];
-  const CUTOFF = new Date("2025-12-12T23:59:59+01:00").getTime();
-  for (const href of result.links) {
-    try {
-      const sub = await getSubmission(null, href, identityFilter);
-      sub.upvoters = sub.upvoters
-        .filter((vote) => vote.timestamp <= CUTOFF)
-        .map(({ identity }) => identity);
-      submissions.push(sub);
-    } catch (err) {
-      log(`Skipping submission ${href}, err ${err.stack}`);
-    }
-  }
-  submissions.sort((a, b) => b.upvotes - a.upvotes);
-
-  return submissions;
 }
 
 async function getAd() {
@@ -524,21 +231,66 @@ const itemAge = (timestamp) => {
   return ageInMinutes;
 };
 
-function calculateUpvoteClickRatio(story) {
-  const clicks = countOutbounds(
-    addOrUpdateReferrer(story.href, story.identity),
-  );
-  return clicks === 0 ? 0 : story.upvotes / clicks;
+// Calculate click-through rate (CTR) for a story
+export function calculateCTR(story) {
+  // Get normalized clicks and impressions counts
+  const clicks = countOutbounds(story.href);
+  const impressions = countImpressions(story.href);
+
+  // Only calculate CTR if we have impressions, otherwise throw
+  if (impressions > 0) {
+    return clicks / impressions;
+  }
+
+  throw new Error("No impressions available for CTR calculation");
+}
+
+// Calculate upvote-to-click ratio
+export function calculateUpvoteClickRatio(story) {
+  const clicks = countOutbounds(story.href);
+  const upvotes = story.upvotes;
+
+  if (clicks > 0) {
+    return upvotes / clicks;
+  }
+  throw new Error("No clicks available for CTR calculation");
+}
+
+function meanCTR(leaves) {
+  const ctrs = [];
+  for (let leaf of leaves) {
+    try {
+      const ctr = calculateCTR(leaf);
+      ctrs.push(ctr);
+    } catch (err) {
+      // noop
+    }
+  }
+  const sumCTRs = ctrs.reduce((sum, ctr) => sum + ctr, 0);
+  if (ctrs.length > 0) {
+    return sumCTRs / ctrs.length;
+  }
+  throw new Error("CTRs length is not available");
 }
 
 function meanUpvoteRatio(leaves) {
-  const ratios = leaves.map((story) => calculateUpvoteClickRatio(story));
+  const ratios = [];
+  for (let leaf of leaves) {
+    try {
+      const ratio = calculateUpvoteClickRatio(leaf);
+      ratios.push(ratio);
+    } catch (err) {
+      // noop
+    }
+  }
   const sumRatios = ratios.reduce((sum, ratio) => sum + ratio, 0);
-  return ratios.length > 0 ? sumRatios / ratios.length : 0;
+  if (ratios.length > 0) {
+    return sumRatios / ratios.length;
+  }
+  throw new Error("Ratios length is not available");
 }
 
 export async function topstories(leaves) {
-  const upvoteRatio = meanUpvoteRatio(leaves);
   return leaves
     .map((story) => {
       const commentCount =
@@ -550,16 +302,31 @@ export async function topstories(leaves) {
         score = Math.log(story.upvotes);
       }
 
-      const outboundClicks = countOutbounds(
-        addOrUpdateReferrer(story.href, story.identity),
-      );
+      const outboundClicks = countOutbounds(story.href) + 1;
       if (outboundClicks > 0) {
         score = score * 0.9 + 0.1 * Math.log(outboundClicks);
       }
 
-      const storyRatio = calculateUpvoteClickRatio(story);
-      const upvotePerformance = storyRatio / upvoteRatio;
-      score *= upvotePerformance;
+      try {
+        const upvoteRatio = meanUpvoteRatio(leaves);
+        const storyRatio = calculateUpvoteClickRatio(story);
+        const upvotePerformance = storyRatio / upvoteRatio;
+        score *= upvotePerformance;
+      } catch (e) {
+        // If Upvote-Click ratio can't be calculated, we just keep the current
+        // score
+      }
+
+      // Try to apply CTR adjustment if available
+      try {
+        const meanCtrValue = meanCTR(leaves);
+        const ctr = calculateCTR(story);
+        // Apply CTR performance relative to mean
+        const ctrPerformance = ctr / meanCtrValue;
+        score *= ctrPerformance;
+      } catch (e) {
+        // If CTR can't be calculated, we just keep the current score
+      }
 
       const decay = Math.sqrt(itemAge(story.timestamp));
       score = score / Math.pow(decay, 6.5);
@@ -583,7 +350,9 @@ async function addMetadata(post) {
   }
 
   const metadataTTLSeconds = 60 * 60; // 1 hour
-  metadata(post.href)
+  const generateTitle = false;
+  const submittedTitle = post.title;
+  metadata(post.href, generateTitle, submittedTitle)
     .then((result) => {
       if (result && result.image) {
         cache.set(metadataCacheKey, result, [metadataTTLSeconds]);
@@ -602,7 +371,6 @@ export async function index(
   }),
   paginate = true,
   showAd = true,
-  showContest = true,
   appCuration = false,
 ) {
   const lookbackUnixTime = Math.floor(lookback.getTime() / 1000);
@@ -774,21 +542,8 @@ export async function index(
     }
   }
 
-  let resolvedContestStories;
-  if (showContest) {
-    const contestCacheKey = "contest-stories-cache";
-    resolvedContestStories = cache.get(contestCacheKey);
-    if (!resolvedContestStories) {
-      const contestTTL = 60 * 5;
-      getContestStories()
-        .then((stories) => resolveIds(stories))
-        .then((resolved) => cache.set(contestCacheKey, resolved, [contestTTL]))
-        .catch((err) => log(`Error loading contest stories: ${err.stack}`));
-    }
-  }
   return {
     pinnedStory,
-    contestStories: resolvedContestStories,
     ad,
     stories,
     originals,
@@ -826,7 +581,6 @@ async function recommended(trie, page, domain, identity, hash) {
   });
   const paginate = false;
   const showAd = false;
-  const showContest = false;
 
   const { ad, originals, stories } = await index(
     trie,
@@ -835,7 +589,6 @@ async function recommended(trie, page, domain, identity, hash) {
     lookback,
     paginate,
     showAd,
-    showContest,
   );
 
   let candidates = await getRecommendations(stories, hash, identity);
@@ -852,7 +605,6 @@ async function recommended(trie, page, domain, identity, hash) {
   candidates = candidates.slice(start, end);
 
   return {
-    contestStories: [],
     ad,
     stories: candidates,
     originals,
@@ -1017,8 +769,7 @@ export default async function (trie, theme, page, domain, identity, hash) {
     content = await index(trie, page, domain);
   }
 
-  const { ad, originals, stories, start, contestStories, pinnedStory } =
-    content;
+  const { ad, originals, stories, start, pinnedStory } = content;
 
   let currentQuery = "";
   if (page && domain) {
@@ -1040,7 +791,13 @@ export default async function (trie, theme, page, domain, identity, hash) {
   const title = undefined;
   const description = undefined;
   const twitterCard = undefined;
-  const prefetch = [query, "/new?cached=true", "/submit", "/best"];
+  const prefetch = [
+    query,
+    "/new?cached=true",
+    "/submit",
+    "/best",
+    "/community",
+  ];
   const recentJoiners = await registry.recents();
   return html`
     <html lang="en" op="news">
@@ -1065,26 +822,6 @@ export default async function (trie, theme, page, domain, identity, hash) {
               </tr>
               <tr>
                 ${SecondHeader(theme, "top")}
-              </tr>
-              <tr>
-                <td>
-                  ${ContestBanner(
-                    contestStories &&
-                      contestStories.map(
-                        Row(
-                          start,
-                          "/",
-                          "margin-bottom: 20px;",
-                          null,
-                          null,
-                          null,
-                          recentJoiners,
-                          false,
-                          currentQuery,
-                        ),
-                      ),
-                  )}
-                </td>
               </tr>
               ${pinnedStory &&
               Row(
@@ -1158,7 +895,7 @@ export default async function (trie, theme, page, domain, identity, hash) {
                     recentJoiners,
                     false,
                     currentQuery,
-                  )(story, i + 8),
+                  )(story, i + 5),
                 )}
               <tr style="height: 50px">
                 <td>

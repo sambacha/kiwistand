@@ -17,7 +17,8 @@ import * as moderation from "./moderation.mjs";
 import * as registry from "../chainstate/registry.mjs";
 import { getLastComment, listNewest } from "../cache.mjs";
 import Row, { extractDomain } from "./components/row.mjs";
-import * as feeds from "../feeds.mjs";
+import log from "../logger.mjs";
+import { purgeCache } from "../cloudflarePurge.mjs";
 
 const html = htm.bind(vhtml);
 
@@ -112,8 +113,17 @@ export async function recompute() {
       isOriginal,
     });
   }
-  stories = nextStories;
+
+  stories = nextStories.sort((a, b) => b.timestamp - a.timestamp);
   inProgress = false;
+  try {
+    // Purge Cloudflare cache for the "/new" page so that new submissions show immediately.
+    await purgeCache("https://news.kiwistand.com/new");
+    await purgeCache("https://news.kiwistand.com/new?cached=true");
+    log("Cloudflare cache purged for /new and /new?cached=true");
+  } catch (error) {
+    log("Cloudflare cache purge skipped: " + error.message);
+  }
 }
 
 export default async function (trie, theme) {
@@ -122,7 +132,7 @@ export default async function (trie, theme) {
   let items = stories;
   const path = "/new";
   const ogImage = "https://news.kiwistand.com/kiwi_new_feed_page.png";
-  const prefetch = ["/", "/submit", "/best"];
+  const prefetch = ["/", "/submit", "/best", "/community"];
   const recentJoiners = await registry.recents();
   const query = "?cached=true";
   return html`

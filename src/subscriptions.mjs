@@ -10,6 +10,7 @@ import { getSubmission } from "./cache.mjs";
 import { resolve } from "./ens.mjs";
 import * as email from "./email.mjs";
 import { truncateComment } from "./views/activity.mjs";
+import { getSlug } from "./utils.mjs";
 
 if (env.NODE_ENV == "production")
   webpush.setVapidDetails(
@@ -63,9 +64,8 @@ export async function triggerNotification(message) {
   const uniqueReceivers = Array.from(new Set(receivers));
 
   const maxChars = 140;
-  const url =
-    `https://news.kiwistand.com/stories?index=0x${submission.index}` +
-    `&cachebuster=0x${message.index}#0x${message.index}`;
+  const slug = getSlug(submission.title);
+  const url = `https://news.kiwistand.com/stories/${slug}?index=0x${submission.index}#0x${message.index}`;
 
   await Promise.allSettled(
     uniqueReceivers.map(async (receiver) => {
@@ -73,7 +73,7 @@ export async function triggerNotification(message) {
         title: `${ensData.displayName} replied`,
         message: truncateComment(message.title, maxChars),
         data: {
-          url: `https://news.kiwistand.com/stories?index=0x${submission.index}&cachebuster=0x${message.index}#0x${message.index}`,
+          url,
         },
       });
       await email.send(receiver, {
@@ -91,6 +91,16 @@ export function store(address, subscription) {
     "INSERT OR REPLACE INTO subscriptions (address, subscription) VALUES (?, ?)",
   );
   stmt.run(address, JSON.stringify(subscription));
+}
+
+export function remove(address, subscription) {
+  const endpoint = subscription.endpoint;
+  const stmt = db.prepare(
+    "DELETE FROM subscriptions WHERE address = ? AND subscription LIKE ?",
+  );
+  // Using a LIKE clause to match the endpoint URL directly, which should work if the URL is unique.
+  const likePattern = `%${endpoint}%`;
+  stmt.run(address, likePattern);
 }
 
 export function get(address) {
@@ -116,8 +126,9 @@ export async function send(address, payload) {
         );
       } catch (error) {
         log(
-          `Error sending a notification to "${address}", err "${err.toString()}"`,
+          `Error sending a notification to "${address}", err "${error.toString()}"`,
         );
+        remove(address, subscription);
       }
     }),
   );

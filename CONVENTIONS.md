@@ -8,6 +8,11 @@ conventions.
 
 - Always make chirurgical changes. Never try to improve any of the surrounding
   code, just make the intented change and minimize the change set.
+- Keep the change set to achieve something minimal and elegant. We highly
+  prefer a narrow solution and then to iterate on it.
+- Avoid regressions at all costs. If unsure about what to prioritize then take
+  the top five options and rank them based on their impact versus their risk of
+  introducing a regression.
 
 ## 1. JavaScript/ES Style
 
@@ -19,9 +24,10 @@ conventions.
 
 ### 1.2. Async Code Patterns
 - Prefer async/await for sequential operations
+- Use Promises (then and catch) if there is a code block that can be executed
+  without having to await its result
 - Use Promise.allSettled for parallel operations
 - Never use Promise.all (fails entire chain on single error)
-- Consider promises when blocking would harm performance
 
 ### 1.3. Variable Naming
 - Use single short words as variables over camelCase
@@ -32,10 +38,13 @@ conventions.
 ### 1.4. Early Returns
 - Return or throw early to avoid nesting
 - Keep code flat, avoid nested if statements
-- Handle failure cases first
+- Handle failure cases first and use early returns
 
 ### 1.5. Error Handling
 - One statement per try {} block in try/catch
+- Only try catch statements for which we expect an error to be thrown and for
+  which we want to adjust the program flow
+- Ideally don't nest try catch statements
 
 ### 1.6. Function Parameter Declaration
 Always declare parameters as variables first for clarity:
@@ -48,8 +57,20 @@ This ensures every parameter has a clear, named purpose and improves code
 readability.
 
 ### 1.7. Keep functions pure and stateless
-- Don't try to maintain state through complex classes etc., instead write a series
-  of pure functions that all do one thing well.
+- Don't try to maintain state through complex classes etc., instead write a
+  series of pure functions that all do one thing well.
+
+### 1.8. Don't use setInterval to call functions with a frequency
+- One issue with using setInterval to repeately calling a function is that if
+  the function's execution time is longer than the defined interval, then we'll
+  stack function calls on top of each other.
+- An alternative therefore is to run a function, then sleep for a while and run
+  the function again. This way we can ensure that a function is only ever
+  called once.
+
+### No unasked fallbacks
+- Unless when specifically asked, don't add fallbacks when destructuring or
+  accessing properties
 
 ## 2. Code Quality
 

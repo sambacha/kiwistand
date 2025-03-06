@@ -1,21 +1,16 @@
 import "vite/modulepreload-polyfill";
-import "@rainbow-me/rainbowkit/styles.css";
+import "./request_monitor.js";
 import PullToRefresh from "pulltorefreshjs";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { isIOS, isRunningPWA, getCookie, getLocalAccount } from "./session.mjs";
 import theme from "./theme.jsx";
-
-function storeReferral() {
-  if (!localStorage.getItem("--kiwi-news-original-referral")) {
-    const urlParams = new URLSearchParams(window.location.search);
-    const referral = urlParams.get("referral");
-    if (referral) {
-      localStorage.setItem("--kiwi-news-original-referral", referral);
-    }
-  }
-}
+import posthog from "posthog-js";
+posthog.init("phc_F3mfkyH5tKKSVxnMbJf0ALcPA98s92s3Jw8a7eqpBGw", {
+  api_host: "https://eu.i.posthog.com",
+  person_profiles: "identified_only", // or 'always' to create profiles for anonymous users as well
+});
 
 window.isSidebarOpen = false;
 function handleClick(event) {
@@ -225,6 +220,25 @@ async function addFriendBuyButton(toast, allowlist) {
   }
 }
 
+async function addEmailSubscriptionForm(allowlist, delegations, toast) {
+  const elem = document.querySelector("email-subscription-form");
+  if (elem) {
+    const { ConnectedEmailSubscriptionForm } = await import("./Bell.jsx");
+    createRoot(elem).render(
+      <StrictMode>
+        <ConnectedEmailSubscriptionForm
+          allowlist={allowlist}
+          delegations={delegations}
+          toast={toast}
+          onSuccess={() => {
+            window.location.href = "/demonstration";
+          }}
+        />
+      </StrictMode>,
+    );
+  }
+}
+
 async function addBuyButton(allowlistPromise, delegationsPromise, toast) {
   const buyButtonContainer = document.querySelector("#buy-button-container");
   if (buyButtonContainer) {
@@ -268,12 +282,18 @@ async function addDelegateButton(allowlist, delegations, toast) {
   const delegateButtonContainer = document.querySelector(".delegate-button");
   if (delegateButtonContainer) {
     const DelegateButton = (await import("./DelegateButton.jsx")).default;
+    const showRedirect =
+      delegateButtonContainer.getAttribute("redirect-button") !== "false";
+    const isAppOnboarding =
+      delegateButtonContainer.getAttribute("is-app-onboarding") === "true";
     createRoot(delegateButtonContainer).render(
       <StrictMode>
         <DelegateButton
           allowlist={allowlist}
           delegations={delegations}
           toast={toast}
+          showRedirect={showRedirect}
+          isAppOnboarding={isAppOnboarding}
         />
       </StrictMode>,
     );
@@ -289,6 +309,7 @@ async function addConnectedComponents(allowlist, delegations, toast) {
         <ConnectedTextConnectButton
           allowlist={allowlist}
           delegations={delegations}
+          toast={toast}
         />
       </StrictMode>,
     );
@@ -300,7 +321,7 @@ async function addConnectedComponents(allowlist, delegations, toast) {
     bellButton.style = "";
     createRoot(bellButton).render(
       <StrictMode>
-        <Bell allowlist={allowlist} delegations={delegations} />
+        <Bell toast={toast} allowlist={allowlist} delegations={delegations} />
       </StrictMode>,
     );
   }
@@ -315,13 +336,30 @@ async function addConnectedComponents(allowlist, delegations, toast) {
       </StrictMode>,
     );
   }
+  const desktopSearchContainer = document.querySelector(
+    "#static-desktop-search",
+  );
+  if (desktopSearchContainer) {
+    import("./DesktopSearch.jsx").then((module) => {
+      createRoot(desktopSearchContainer).render(
+        <StrictMode>
+          <module.default />
+        </StrictMode>,
+      );
+    });
+  }
 
   const mobileBellButton = document.querySelector(".mobile-bell-container");
   if (mobileBellButton) {
     const Bell = (await import("./Bell.jsx")).default;
     createRoot(mobileBellButton).render(
       <StrictMode>
-        <Bell mobile allowlist={allowlist} delegations={delegations} />
+        <Bell
+          toast={toast}
+          mobile
+          allowlist={allowlist}
+          delegations={delegations}
+        />
       </StrictMode>,
     );
   }
@@ -331,7 +369,11 @@ async function addConnectedComponents(allowlist, delegations, toast) {
     const { ConnectedProfile } = await import("./Navigation.jsx");
     createRoot(profileLink).render(
       <StrictMode>
-        <ConnectedProfile allowlist={allowlist} delegations={delegations} />
+        <ConnectedProfile
+          toast={toast}
+          allowlist={allowlist}
+          delegations={delegations}
+        />
       </StrictMode>,
     );
   }
@@ -341,7 +383,7 @@ async function addConnectedComponents(allowlist, delegations, toast) {
     const { ConnectedDisconnectButton } = await import("./Navigation.jsx");
     createRoot(disconnect).render(
       <StrictMode>
-        <ConnectedDisconnectButton />
+        <ConnectedDisconnectButton toast={toast} />
       </StrictMode>,
     );
   }
@@ -355,7 +397,7 @@ async function addConnectedComponents(allowlist, delegations, toast) {
     );
     createRoot(simpledisconnect).render(
       <StrictMode>
-        <ConnectedSimpleDisconnectButton />
+        <ConnectedSimpleDisconnectButton toast={toast} />
       </StrictMode>,
     );
   }
@@ -366,7 +408,7 @@ async function addConnectedComponents(allowlist, delegations, toast) {
     );
     createRoot(headerdisconnect).render(
       <StrictMode>
-        <ConnectedSimpleDisconnectButton label="Disconnect" />
+        <ConnectedSimpleDisconnectButton label="Disconnect" toast={toast} />
       </StrictMode>,
     );
   }
@@ -398,7 +440,7 @@ async function addPasskeysDialogue(toast, allowlist) {
           >
             Your next step:
           </p>
-          <a href="/demonstration">
+          <a href="/email-notifications">
             <button
               className="button-secondary"
               style={{ width: "auto" }}
@@ -539,6 +581,55 @@ async function addAvatar(allowlist) {
   }
 }
 
+async function addStoryEmojiReactions(allowlist, delegations, toast) {
+  const reactionContainers = document.querySelectorAll(".reactions-container");
+  if (reactionContainers && reactionContainers.length > 0) {
+    const [commentSection, wagmi, rainbowKit, clientConfig] = await Promise.all(
+      [
+        import("./CommentSection.jsx"),
+        import("wagmi"),
+        import("@rainbow-me/rainbowkit"),
+        import("./client.mjs"),
+      ],
+    );
+
+    const { EmojiReaction } = commentSection;
+    const { WagmiConfig } = wagmi;
+    const { RainbowKitProvider } = rainbowKit;
+    const { client, chains } = clientConfig;
+
+    reactionContainers.forEach((container) => {
+      const commentData = container.getAttribute("data-comment");
+      if (commentData) {
+        const comment = JSON.parse(commentData);
+        const root = createRoot(container);
+
+        // Keep existing content as fallback while React loads
+        const existingContent = container.innerHTML;
+
+        // Prepare the React component
+        const reactComponent = (
+          <StrictMode>
+            <WagmiConfig config={client}>
+              <RainbowKitProvider chains={chains}>
+                <EmojiReaction
+                  comment={comment}
+                  allowlist={allowlist}
+                  delegations={delegations}
+                  toast={toast}
+                />
+              </RainbowKitProvider>
+            </WagmiConfig>
+          </StrictMode>
+        );
+
+        // Render React component while preserving existing content
+        root.render(reactComponent);
+      }
+    });
+  }
+}
+
 async function addNFTPrice() {
   const nftPriceElements = document.querySelectorAll("nft-price");
   if (nftPriceElements && nftPriceElements.length > 0) {
@@ -549,6 +640,26 @@ async function addNFTPrice() {
       createRoot(element).render(
         <StrictMode>
           <NFTPrice fee={fee} selector={selector} />
+        </StrictMode>,
+      );
+    });
+  }
+}
+
+async function addKarmaElements() {
+  const karmaElements = document.querySelectorAll("nav-karma");
+  if (karmaElements && karmaElements.length > 0) {
+    const Karma = (await import("./Karma.jsx")).default;
+    karmaElements.forEach((element) => {
+      const address = element.getAttribute("data-address");
+      const initial = element.getAttribute("data-initial");
+      const initialContent = element.textContent.trim();
+
+      createRoot(element).render(
+        <StrictMode>
+          <Karma address={address} initial={initial}>
+            {initialContent}
+          </Karma>
         </StrictMode>,
       );
     });
@@ -598,7 +709,7 @@ async function checkMintStatus(address) {
     if (supportsPasskeys() && (await testPasskeys())) {
       window.location.href = "/passkeys";
     } else {
-      window.location.href = "/demonstration";
+      window.location.href = "/email-notifications";
     }
   }, 3000);
 }
@@ -635,7 +746,9 @@ async function startWatchAccount(allowlist, delegations) {
     address = account.address;
   }
   const identity = address && eligible(allowlist, delegations, address);
-  if (!identity) {
+  if (identity) {
+    posthog.identify(identity);
+  } else {
     hideDesktopLinks();
     return;
   }
@@ -795,7 +908,85 @@ export function dynamicPrefetch(url, priority = "auto") {
   prefetchedUrls.add(url);
 }
 
+function trackLinkImpressions() {
+  // Find all story links
+  const storyLinks = document.querySelectorAll(".story-link");
+  if (storyLinks.length === 0) return;
+
+  // Get current hostname for comparison
+  const currentHostname = window.location.hostname;
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const link = entry.target;
+          const href = link.getAttribute("href");
+
+          if (!href) return;
+
+          if (
+            href.startsWith("javascript:") ||
+            href.startsWith("/") ||
+            href.startsWith("#") ||
+            href.startsWith("mailto:") ||
+            href.startsWith("tel:") ||
+            !href.includes("://")
+          )
+            return;
+
+          try {
+            const linkUrl = new URL(href);
+            if (linkUrl.hostname === currentHostname) return;
+          } catch (e) {
+            return;
+          }
+
+          // Check if this URL has already been tracked in this session
+          const storageKey = `impression_${href}`;
+          if (sessionStorage.getItem(storageKey)) return;
+
+          // Mark this URL as tracked in this session
+          sessionStorage.setItem(storageKey, "tracked");
+
+          // Send impression beacon
+          try {
+            navigator.sendBeacon(
+              "/impression?url=" + encodeURIComponent(href)
+            );
+          } catch (err) {
+            console.log("Error tracking impression:", err);
+          }
+
+          // Stop observing this link
+          observer.unobserve(link);
+        }
+      });
+    },
+    { threshold: 0.5 }, // Link must be 50% visible to count as an impression
+  );
+
+  storyLinks.forEach((link) => observer.observe(link));
+}
+
 async function start() {
+  // Spinner overlay initialization
+  if (!document.getElementById("spinner-overlay")) {
+    const overlay = document.createElement("div");
+    overlay.id = "spinner-overlay";
+    overlay.style.display = "none";
+    overlay.style.position = "fixed";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = "100%";
+    overlay.style.height = "100%";
+    overlay.style.background = "rgba(255,255,255,0.7)";
+    overlay.style.zIndex = "9999";
+    document.body.appendChild(overlay);
+  }
+
+  // Initialize link impression tracking
+  trackLinkImpressions();
   // NOTE: There are clients which had the identity cookie sent to 1 week and
   // they're now encountering the paywall. So in case this happens but their
   // local storage contains the respective private key, we want them to reload
@@ -803,9 +994,9 @@ async function start() {
   const identity = getCookie("identity");
   window.initialIdentityCookie = identity;
 
-  initKiwiRotation(".hnname span img");
-
-  storeReferral();
+  window.addEventListener("DOMContentLoaded", () => {
+    initKiwiRotation(".hnname span img");
+  });
 
   makeCommentsVisited();
   window.addEventListener("hashchange", makeCommentsVisited);
@@ -815,40 +1006,20 @@ async function start() {
 
   updateLinkTargetsForIOSPWA();
 
-  if (
-    window.location.pathname === "/" &&
-    !window.location.search.includes("identity=") &&
-    !window.location.search.includes("custom=")
-  ) {
-    const personalizedFeedUrl = identity
-      ? `${window.location.origin}/?identity=${identity}`
-      : `${window.location.origin}/custom=true`;
-    const priority = "high";
-    dynamicPrefetch(personalizedFeedUrl, priority);
-  }
-
   // NOTE: We don't want pull to refresh for the submission page as this could
   // mess up the user's input on an accidential scroll motion.
-  if (
-    window.location.pathname !== "/submit" &&
-    !document.documentElement.classList.contains("kiwi-ios-app")
-  ) {
+  if (window.location.pathname !== "/submit") {
     PullToRefresh.init({
       mainElement: "body",
       // NOTE: If the user is searching in the search drawer, we don't want
       // them to accidentially reload the page
       shouldPullToRefresh: () =>
-        !window.isSidebarOpen && !window.drawerIsOpen && !window.scrollY,
+        !window.isSidebarOpen &&
+        !window.drawerIsOpen &&
+        !window.scrollY &&
+        !document.documentElement.classList.contains("kiwi-ios-app"),
       onRefresh: () => {
-        if (window.location.pathname === "/") {
-          if (identity) {
-            window.location.href = `/?identity=${identity}`;
-          } else {
-            window.location.href = `/?custom=true`;
-          }
-        } else {
-          window.location.reload();
-        }
+        window.location.reload();
       },
     });
   }
@@ -865,6 +1036,7 @@ async function start() {
   await startWatchAccount(await allowlistPromise, await delegationsPromise);
 
   const results0 = await Promise.allSettled([
+    import("@rainbow-me/rainbowkit/styles.css"), // Load styles in parallel
     addDynamicComments(await allowlistPromise, await delegationsPromise, toast),
     addVotes(await allowlistPromise, await delegationsPromise, toast),
   ]);
@@ -872,13 +1044,24 @@ async function start() {
   const results1 = await Promise.allSettled([
     addDynamicNavElements(),
     addInviteLink(toast),
+    addStoryEmojiReactions(
+      await allowlistPromise,
+      await delegationsPromise,
+      toast,
+    ),
     addDecayingPriceLink(),
     addCommentInput(toast, await allowlistPromise, await delegationsPromise),
     addSubscriptionButton(await allowlistPromise, toast),
     addTGLink(await allowlistPromise),
+    addEmailSubscriptionForm(
+      await allowlistPromise,
+      await delegationsPromise,
+      toast,
+    ),
     addPasskeysDialogue(toast, await allowlistPromise),
     addModals(await allowlistPromise, await delegationsPromise, toast),
     addNFTPrice(),
+    addKarmaElements(),
     addMinuteCountdown(),
     addAvatar(await allowlistPromise),
     addDelegateButton(await allowlistPromise, await delegationsPromise, toast),

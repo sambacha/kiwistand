@@ -1,13 +1,24 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import posthog from "posthog-js";
 import { RainbowKitProvider } from "@rainbow-me/rainbowkit";
 import { WagmiConfig, useAccount } from "wagmi";
 import { Wallet } from "@ethersproject/wallet";
 import { eligible } from "@attestate/delegator2";
 import Drawer from "react-bottom-drawer";
+import slugify from "slugify";
+import DOMPurify from "isomorphic-dompurify";
 
 import * as API from "./API.mjs";
 import { getLocalAccount } from "./session.mjs";
 import { client, chains, useProvider, useSigner } from "./client.mjs";
+
+// Configure slugify extension
+slugify.extend({ "′": "", "'": "", "'": "" });
+
+// Implement getSlug exactly as in src/utils.mjs
+export function getSlug(title) {
+  return slugify(DOMPurify.sanitize(title));
+}
 
 const SiteExplainer = () => {
   return (
@@ -62,6 +73,163 @@ const SiteExplainer = () => {
   );
 };
 
+const useIsMobile = () => {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth <= 768);
+    };
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  return isMobile;
+};
+
+const MobileComposer = ({
+  text,
+  setText,
+  onSubmit,
+  onCancel,
+  isLoading,
+  characterLimit,
+}) => {
+  const [viewportHeight, setViewportHeight] = useState(
+    window.visualViewport ? window.visualViewport.height : window.innerHeight,
+  );
+  useEffect(() => {
+    function updateHeight() {
+      setViewportHeight(
+        window.visualViewport
+          ? window.visualViewport.height
+          : window.innerHeight,
+      );
+    }
+    updateHeight();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", updateHeight);
+    } else {
+      window.addEventListener("resize", updateHeight);
+    }
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", updateHeight);
+      } else {
+        window.removeEventListener("resize", updateHeight);
+      }
+    };
+  }, []);
+  return (
+    <div
+      onTouchMove={(e) => {
+        if (!e.target.closest("textarea")) {
+          e.preventDefault();
+        }
+      }}
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: "white",
+        zIndex: 1000,
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        overflow: "hidden",
+        touchAction: "none",
+        overscrollBehavior: "none",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "1rem",
+          borderBottom: "var(--border)",
+          position: "sticky",
+          top: 0,
+          backgroundColor: "white",
+          zIndex: 2,
+        }}
+      >
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onCancel();
+            document.activeElement && document.activeElement.blur();
+          }}
+          style={{
+            background: "none",
+            border: "none",
+            fontSize: "1rem",
+            cursor: "pointer",
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onSubmit}
+          disabled={isLoading}
+          style={{
+            background: "black",
+            color: "white",
+            border: "none",
+            padding: "0.5rem 1rem",
+            borderRadius: "2px",
+            fontSize: "0.9rem",
+            cursor: "pointer",
+          }}
+        >
+          {isLoading ? "Submitting..." : "Submit"}
+        </button>
+      </div>
+      <textarea
+        autoFocus
+        onPaste={(e) => {
+          setTimeout(() => {
+            setText(e.target.value);
+          }, 0);
+        }}
+        style={{
+          flex: 1,
+          border: "none",
+          padding: "1rem",
+          fontSize: "1rem",
+          resize: "none",
+          outline: "none",
+          width: "100%",
+          height: "100%",
+          overflowY: "auto",
+          touchAction: "auto",
+        }}
+        onTouchMove={(e) => e.stopPropagation()}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div
+        style={{
+          padding: "0.5rem 1rem",
+          borderTop: "var(--border)",
+          fontSize: "0.8rem",
+          color: "#666",
+          position: "sticky",
+          bottom: 0,
+          backgroundColor: "white",
+          zIndex: 2,
+        }}
+      >
+        {(characterLimit - text.length).toLocaleString()} characters remaining
+      </div>
+    </div>
+  );
+};
+
 const CommentInput = (props) => {
   const { toast, allowlist, delegations } = props;
 
@@ -104,9 +272,78 @@ const CommentInput = (props) => {
     `-kiwi-news-comment-${address}-${getIndex()}`,
   );
   const [text, setText] = useState(existingComment || "");
+  const [showMobileComposer, setShowMobileComposer] = useState(false);
+  const [disableAutoOpen, setDisableAutoOpen] = useState(false);
+  const isMobile = useIsMobile();
   useEffect(() => {
     localStorage.setItem(`-kiwi-news-comment-${address}-${getIndex()}`, text);
   }, [text]);
+
+  useEffect(() => {
+    if (showMobileComposer) {
+      document.body.style.overflow = "hidden";
+      document.documentElement.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+    }
+
+    function preventScroll(e) {
+      if (!showMobileComposer) return;
+
+      // Stop propagation to prevent underlying page from scrolling.
+      e.stopPropagation();
+
+      // For touchmove events inside a textarea (e.g. selection handles), allow native behavior.
+      if (e.type === "touchmove" && e.target.closest("textarea")) {
+        return;
+      }
+
+      if (e.target.closest("textarea")) {
+        const textarea = e.target.closest("textarea");
+        // Prevent scrolling if the textarea is empty.
+        if (textarea.value.trim() === "") {
+          e.preventDefault();
+          return;
+        }
+        if (e.type === "wheel") {
+          const isScrollable = textarea.scrollHeight > textarea.clientHeight;
+          const isAtTop = textarea.scrollTop === 0;
+          const isAtBottom =
+            textarea.scrollTop + textarea.clientHeight ===
+            textarea.scrollHeight;
+
+          // Prevent scroll if content fits or we're at the bounds.
+          if (
+            !isScrollable ||
+            (isAtTop && e.deltaY < 0) ||
+            (isAtBottom && e.deltaY > 0)
+          ) {
+            e.preventDefault();
+          }
+        }
+      } else {
+        e.preventDefault();
+      }
+    }
+
+    // Handle both touch and mouse wheel events
+    document.addEventListener("touchmove", preventScroll, {
+      passive: false,
+      capture: true,
+    });
+    document.addEventListener("wheel", preventScroll, {
+      passive: false,
+      capture: true,
+    });
+
+    return () => {
+      document.removeEventListener("touchmove", preventScroll, {
+        capture: true,
+      });
+      document.removeEventListener("wheel", preventScroll, { capture: true });
+    };
+  }, [showMobileComposer]);
 
   const [isLoading, setIsLoading] = useState(false);
   const handleSubmit = async (e) => {
@@ -148,10 +385,11 @@ const CommentInput = (props) => {
     // NOTE: We fetch the current page here in JavaScript to (hopefully)
     // produce a cache revalidation that then makes the new comment fastly
     // available to all other users.
-    const path = `/stories?index=${getIndex()}`;
+    const path = `/stories?index=${index}`;
     fetch(path);
     toast.success("Thanks for submitting your comment. Reloading...");
-    localStorage.removeItem(`-kiwi-news-comment-${address}-${getIndex()}`);
+    posthog.capture("comment_created");
+    localStorage.removeItem(`-kiwi-news-comment-${address}-${index}`);
 
     const nextPage = new URL(path, window.location.origin);
     if (response?.data?.index) {
@@ -183,6 +421,11 @@ const CommentInput = (props) => {
   const textareaRef = useRef(null);
   useEffect(() => {
     const handleKeyPress = (e) => {
+      if (
+        document.activeElement &&
+        document.activeElement.tagName === "TEXTAREA"
+      )
+        return;
       if (e.key !== "r") return;
 
       const selection = window.getSelection();
@@ -194,11 +437,22 @@ const CommentInput = (props) => {
 
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
+      const before = text.slice(0, start);
+      const prefix =
+        before.length === 0
+          ? ""
+          : before.endsWith("\n\n")
+          ? ""
+          : before.endsWith("\n")
+          ? "\n"
+          : "\n\n";
       const quote =
+        prefix +
         selected
           .split("\n")
           .map((line) => `> ${line}`)
-          .join("\n") + "\n\n";
+          .join("\n") +
+        "\n\n";
 
       setText(text.slice(0, start) + quote + text.slice(end));
 
@@ -220,45 +474,72 @@ const CommentInput = (props) => {
         ...props.style,
       }}
     >
-      <textarea
-        ref={textareaRef}
-        onFocus={toggleNavigationItems}
-        onBlur={toggleNavigationItems}
-        rows="12"
-        cols="80"
-        style={{
-          display: "block",
-          width: "100%",
-          border: "var(--border)",
-          fontSize: "1rem",
-          borderRadius: "2px",
-        }}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        disabled={isLoading || !address || !isEligible}
-      ></textarea>
-      <span>
-        Characters remaining: {(characterLimit - text.length).toLocaleString()}
-      </span>
-      <br />
-      <br />
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <button
-          id="button-onboarding"
-          style={{ marginBottom: "10px", width: "auto" }}
-          disabled={isLoading || !address || !isEligible}
-          onClick={handleSubmit}
-        >
-          {isLoading ? "Submitting..." : "Add comment"}
-        </button>
-        <CommentGuidelines />
-      </div>
+      {showMobileComposer && isMobile ? (
+        <MobileComposer
+          text={text}
+          setText={setText}
+          onSubmit={handleSubmit}
+          onCancel={() => {
+            setShowMobileComposer(false);
+            setDisableAutoOpen(true);
+            setTimeout(() => setDisableAutoOpen(false), 300);
+          }}
+          isLoading={isLoading}
+          characterLimit={characterLimit}
+        />
+      ) : (
+        <>
+          <textarea
+            ref={textareaRef}
+            onFocus={(e) => {
+              if (isMobile) {
+                if (disableAutoOpen) return;
+                e.preventDefault();
+                setShowMobileComposer(true);
+              } else {
+                toggleNavigationItems();
+              }
+            }}
+            onBlur={!isMobile ? toggleNavigationItems : undefined}
+            rows="12"
+            cols="80"
+            style={{
+              display: "block",
+              width: "100%",
+              border: "var(--border)",
+              fontSize: "1rem",
+              borderRadius: "2px",
+              resize: "vertical",
+            }}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={isLoading || !address || !isEligible}
+          ></textarea>
+          <span>
+            Characters remaining:{" "}
+            {(characterLimit - text.length).toLocaleString()}
+          </span>
+          <br />
+          <br />
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <button
+              id="button-onboarding"
+              style={{ marginBottom: "10px", width: "auto" }}
+              disabled={isLoading || !address || !isEligible}
+              onClick={handleSubmit}
+            >
+              {isLoading ? "Submitting..." : "Add comment"}
+            </button>
+            <CommentGuidelines />
+          </div>
+        </>
+      )}
     </div>
   );
 };

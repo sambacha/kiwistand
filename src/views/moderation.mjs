@@ -21,7 +21,7 @@ const fetchStaleWhileRevalidate = fetchCache(fetch, cache);
 const url =
   "https://opensheet.elk.sh/1kh9zHwzekLb7toabpdSfd87pINBpyVU6Q8jLliBXtEc/";
 export async function getConfig(sheet) {
-  const signal = AbortSignal.timeout(5000);
+  const signal = AbortSignal.timeout(10000);
   const response = await fetchStaleWhileRevalidate(url + sheet, { signal });
   if (response.ok) {
     return await response.json();
@@ -173,6 +173,13 @@ export async function getLists() {
     log(`banlist_messages: Couldn't get config: ${err.toString()}`);
   }
 
+  let labels = {};
+  try {
+    labels = await getLabels();
+  } catch (err) {
+    log(`labels: Couldn't get config: ${err.toString()}`);
+  }
+
   return {
     pinned,
     hrefs,
@@ -181,6 +188,7 @@ export async function getLists() {
     addresses,
     links,
     images,
+    labels,
   };
 }
 
@@ -228,5 +236,22 @@ export function moderate(leaves, config, path) {
       ({ href }) => !Object.values(config.hrefs).includes(normalizeUrl(href)),
     );
   }
+  result = result.map((leaf) => {
+    const norm = normalizeUrl(leaf.href, { stripWWW: false });
+    return { ...leaf, label: (config.labels && config.labels[norm]) || "" };
+  });
   return result;
+}
+
+export async function getLabels() {
+  let labelsMapping = {};
+  try {
+    const response = await getConfig("labels");
+    response.forEach(({ links, labels }) => {
+      labelsMapping[normalizeUrl(links, { stripWWW: false })] = labels;
+    });
+  } catch (err) {
+    log(`labels: Couldn't get labels: ${err.toString()}`);
+  }
+  return labelsMapping;
 }

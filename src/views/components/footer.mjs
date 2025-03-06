@@ -29,19 +29,29 @@ function loadManifest() {
 let scripts;
 if (env.NODE_ENV === "production") {
   const manifest = loadManifest();
-  scripts = html`
-    <link rel="stylesheet" href="${manifest["src/main.css"].css}" />
-    <script type="module" src="${manifest["src/main.jsx"].file}"></script>
-  `;
+  
+  // Check if CSS path exists in the manifest
+  const cssLink = manifest["src/main.css"] && manifest["src/main.css"].css 
+    ? html`<link rel="stylesheet" href="${manifest["src/main.css"].css}" />` 
+    : '';
+  
+  // Check if JS path exists in the manifest
+  const jsScript = manifest["src/main.jsx"] && manifest["src/main.jsx"].file
+    ? html`<script type="module" src="${manifest["src/main.jsx"].file}"></script>` 
+    : '';
+  
+  // Combine the elements
+  scripts = html`${cssLink}${jsScript}`;
 } else {
   // NOTE: There can be cases where you want to test the development build with
   // vite hot reloading and then it's best to define your machine's host name
   // as the CUSTOM_HOST_NAME here - and not have it be localhost.
+  const protocol = env.CUSTOM_PROTOCOL ? env.CUSTOM_PROTOCOL : "http://";
   const host = env.CUSTOM_HOST_NAME ? env.CUSTOM_HOST_NAME : "localhost:5173";
   scripts = html`
     <script type="module" src="refresh-react.js"></script>
-    <script type="module" src="http://${host}/@vite/client"></script>
-    <script type="module" src="http://${host}/src/main.jsx"></script>
+    <script type="module" src="${protocol}${host}/@vite/client"></script>
+    <script type="module" src="${protocol}${host}/src/main.jsx"></script>
   `;
 }
 
@@ -55,7 +65,6 @@ const footer = (theme, path) => html`
       <div>
         <strong>Resources</strong><br />
         <a href="/privacy-policy">Privacy Policy</a><br />
-        <a href="/onboarding-reader">Onboarding</a><br />
         <a href="/shortcut">iOS Shortcut</a><br />
       </div>
       <div>
@@ -106,11 +115,11 @@ const footer = (theme, path) => html`
 
     ${scripts}
     <script
-      async
+      defer
       src="https://www.googletagmanager.com/gtag/js?id=G-21BKTD0NKN"
     ></script>
     <script defer src="ga.js"></script>
-    <script src="instantpage.js" type="module"></script>
+    <script async src="instantpage.js" type="module"></script>
     <nav-signup-dialogue />
   </footer>
 `;

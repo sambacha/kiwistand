@@ -61,6 +61,32 @@ export function initializeLtCache() {
   return false;
 }
 
+export function initializeImpressions() {
+  const exists = db
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='impressions'`,
+    )
+    .get();
+  if (exists) {
+    log(
+      "Aborting cache.initializeImpressions early because table already exists",
+    );
+    return true;
+  }
+
+  log("Creating impressions table");
+  db.exec(`CREATE TABLE IF NOT EXISTS impressions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     url TEXT NOT NULL,
+     hash TEXT NOT NULL,
+     timestamp INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_impressions_url ON impressions(url);
+  CREATE INDEX IF NOT EXISTS idx_impressions_hash ON impressions(hash);
+  CREATE INDEX IF NOT EXISTS idx_impressions_timestamp ON impressions(timestamp);`);
+  return false;
+}
+
 export function initialize(messages) {
   let isSetup = true;
   const tables = ["fingerprints", "submissions", "upvotes", "comments"];
@@ -356,6 +382,21 @@ export function countOutbounds(url, hours = 24) {
   return result.uniqueHashCount;
 }
 
+export function countImpressions(url, hours = 24) {
+  const normalizedUrl = normalizeUrl(url, {
+    stripWWW: false,
+  });
+  const cutoffTimestamp = Math.floor(Date.now() / 1000 - hours * 60 * 60);
+
+  const query = db.prepare(`
+     SELECT COUNT(DISTINCT hash) AS uniqueHashCount
+     FROM impressions 
+     WHERE url = ? AND timestamp >= ?
+   `);
+  const result = query.get(normalizedUrl, cutoffTimestamp);
+  return result ? result.uniqueHashCount : 0;
+}
+
 export function trackOutbound(url, hash) {
   const normalizedUrl = normalizeUrl(url, {
     stripWWW: false,
@@ -363,6 +404,17 @@ export function trackOutbound(url, hash) {
   const timestamp = Math.floor(Date.now() / 1000);
   const insert = db.prepare(
     `INSERT INTO fingerprints(url, hash, timestamp) VALUES (?,?,?)`,
+  );
+  insert.run(normalizedUrl, hash, timestamp);
+}
+
+export function trackImpression(url, hash) {
+  const normalizedUrl = normalizeUrl(url, {
+    stripWWW: false,
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const insert = db.prepare(
+    `INSERT INTO impressions(url, hash, timestamp) VALUES (?,?,?)`,
   );
   insert.run(normalizedUrl, hash, timestamp);
 }
@@ -383,6 +435,105 @@ export function getNumberOfOnlineUsers() {
   });
 
   return uniqueIdentities.size;
+}
+
+// Calculate karma directly from SQLite database
+export function calculateKarmaFromDB(identity, endDate) {
+  try {
+    let dateFilter = "";
+    let params = [identity];
+    
+    if (endDate) {
+      const endTimestamp = Math.floor(endDate.getTime() / 1000);
+      dateFilter = "AND s.timestamp <= ?";
+      params.push(endTimestamp);
+    }
+    
+    // Count submissions
+    const submissionsQuery = `
+      SELECT COUNT(*) as count, href
+      FROM submissions s
+      WHERE s.identity = ? ${dateFilter}
+      GROUP BY href
+    `;
+    
+    const submissions = db.prepare(submissionsQuery).all(params);
+    
+    // For each submission, count upvotes
+    let totalKarma = 0;
+    
+    for (const submission of submissions) {
+      // Each submission gives 1 base point
+      totalKarma += 1;
+      
+      // Count upvotes for this submission
+      let upvotesQuery = `
+        SELECT COUNT(*) as count
+        FROM upvotes u
+        WHERE u.href = ?
+      `;
+      
+      const upvoteParams = [submission.href];
+      
+      // Add timestamp filter if needed
+      if (endDate) {
+        upvotesQuery += " AND u.timestamp <= ?";
+        upvoteParams.push(Math.floor(endDate.getTime() / 1000));
+      }
+      
+      const upvotes = db.prepare(upvotesQuery).get(upvoteParams);
+      totalKarma += upvotes.count;
+    }
+    
+    return totalKarma;
+  } catch (err) {
+    log(`Error calculating karma from DB: ${err.toString()}`);
+    return 0;
+  }
+}
+
+// Get top karma users directly from database
+export function getKarmaRanking() {
+  try {
+    const query = `
+      WITH submission_counts AS (
+        SELECT identity, COUNT(*) as submission_count
+        FROM submissions
+        GROUP BY identity
+      ),
+      upvote_counts AS (
+        SELECT s.identity, COUNT(*) as upvote_count
+        FROM submissions s
+        JOIN upvotes u ON s.href = u.href
+        GROUP BY s.identity
+      )
+      SELECT 
+        sc.identity as identity,
+        COALESCE(sc.submission_count, 0) + COALESCE(uc.upvote_count, 0) as karma
+      FROM submission_counts sc
+      LEFT JOIN upvote_counts uc ON sc.identity = uc.identity
+      
+      UNION
+      
+      SELECT 
+        uc.identity as identity,
+        COALESCE(sc.submission_count, 0) + COALESCE(uc.upvote_count, 0) as karma
+      FROM upvote_counts uc
+      LEFT JOIN submission_counts sc ON uc.identity = sc.identity
+      WHERE sc.identity IS NULL
+      
+      ORDER BY karma DESC
+    `;
+    
+    const results = db.prepare(query).all();
+    return results.map(row => ({
+      identity: row.identity,
+      karma: row.karma
+    }));
+  } catch (err) {
+    log(`Error in getKarmaRanking: ${err.toString()}`);
+    return [];
+  }
 }
 
 export function getBest(amount, from, orderBy, domain, startDatetime) {
@@ -533,6 +684,50 @@ export function getAllComments() {
         index: comment.id.split("0x")[1],
       };
     });
+}
+
+export function getReactionsToComments(identity) {
+  const threeWeeksAgo = Math.floor(Date.now() / 1000) - 1814400;
+  
+  // Get reactions to the user's comments
+  const reactions = db
+    .prepare(
+      `
+      SELECT 
+        r.*,
+        c.title AS comment_title,
+        s.title AS submission_title,
+        s.id AS submission_id
+      FROM 
+        reactions r
+      JOIN 
+        comments c ON r.comment_id = c.id
+      JOIN
+        submissions s ON c.submission_id = s.id
+      WHERE 
+        c.identity = ? AND 
+        r.identity != ? AND
+        r.timestamp >= ?
+      ORDER BY
+        r.timestamp DESC
+    `)
+    .all(identity, identity, threeWeeksAgo)
+    .map((reaction) => {
+      const commentId = reaction.comment_id;
+      const submissionId = reaction.submission_id;
+      delete reaction.comment_id;
+      delete reaction.submission_id;
+
+      return {
+        ...reaction,
+        commentId,
+        submissionId,
+        index: reaction.id.split("0x")[1],
+        type: "reaction"
+      };
+    });
+
+  return reactions;
 }
 
 export function getComments(identity) {

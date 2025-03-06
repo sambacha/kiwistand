@@ -29,7 +29,7 @@ import log from "../logger.mjs";
 import { EIP712_MESSAGE } from "../constants.mjs";
 import Row, { extractDomain } from "./components/row.mjs";
 import * as karma from "../karma.mjs";
-import { truncateName } from "../utils.mjs";
+import { truncateName, getSlug } from "../utils.mjs";
 import { identityClassifier } from "./feed.mjs";
 import { metadata, render } from "../parser.mjs";
 import { getSubmission } from "../cache.mjs";
@@ -99,6 +99,7 @@ export function generateList(profiles, submitter) {
         >
           ${submitter.safeAvatar
             ? html`<img
+                loading="lazy"
                 src="${submitter.safeAvatar}"
                 alt="avatar"
                 style="object-fit: contain; width: 15px; height: 15px; border: 1px solid #828282; border-radius: 2px;"
@@ -120,6 +121,7 @@ export function generateList(profiles, submitter) {
             >
               ${profile.avatar
                 ? html`<img
+                    loading="lazy"
                     src="${profile.avatar}"
                     alt="avatar"
                     style="object-fit: contain; width: 15px; height: 15px; border: 1px solid #828282; border-radius: 2px;"
@@ -197,9 +199,10 @@ export default async function (trie, theme, index, value, referral) {
   }
   const path = "/stories";
 
+  const generateTitle = false;
   let data;
   try {
-    data = await metadata(value.href);
+    data = await metadata(value.href, generateTitle, value.title);
   } catch (err) {}
 
   const policy = await moderation.getLists();
@@ -236,16 +239,44 @@ export default async function (trie, theme, index, value, referral) {
 
   story.comments = moderation.flag(story.comments, policy);
 
-  for await (let comment of story.comments) {
-    const profile = await ens.resolve(comment.identity);
-    if (profile && profile.displayName) {
-      comment.displayName = profile.displayName;
-    } else {
-      comment.displayName = comment.identity;
-    }
-    if (profile && profile.safeAvatar) {
-      comment.avatar = profile.safeAvatar;
-    }
+  // Collect all identities that need resolving
+  const identities = new Set();
+  story.comments.forEach((comment) => {
+    identities.add(comment.identity);
+    comment.reactions.forEach((reaction) => {
+      reaction.reactors.forEach((reactor) => identities.add(reactor));
+    });
+  });
+
+  // Resolve all profiles at once
+  const profileResults = await Promise.allSettled(
+    Array.from(identities).map((id) => ens.resolve(id)),
+  );
+
+  const resolvedProfiles = Object.fromEntries(
+    Array.from(identities).map((id, i) => [
+      id,
+      profileResults[i].status === "fulfilled" ? profileResults[i].value : null,
+    ]),
+  );
+
+  // Enrich comments with resolved profiles
+  for (let comment of story.comments) {
+    const profile = resolvedProfiles[comment.identity];
+    comment.displayName = profile?.displayName || comment.identity;
+    comment.avatar = profile?.safeAvatar;
+    comment.identity = {
+      address: comment.identity,
+      ...profile,
+    };
+
+    // Enrich reactions with resolved profiles
+    comment.reactions = comment.reactions.map((reaction) => ({
+      ...reaction,
+      reactorProfiles: reaction.reactors
+        .map((reactor) => resolvedProfiles[reactor])
+        .filter(Boolean),
+    }));
   }
   const actions = profiles.sort((a, b) => a.timestamp - b.timestamp);
   story.avatars = avatars;
@@ -267,12 +298,13 @@ export default async function (trie, theme, index, value, referral) {
       ? data.ogDescription
       : "Kiwi News is the prime feed for hacker engineers building a decentralized future. All our content is handpicked and curated by crypto veterans.";
   const recentJoiners = await registry.recents();
-  const link = `https://news.kiwistand.com/stories?index=0x${index}${
-    referral ? `&referral=${referral}` : ""
-  }`;
+  const link = `https://news.kiwistand.com/stories/${getSlug(
+    value.title,
+  )}?index=0x${index}${referral ? `&referral=${referral}` : ""}`;
   return html`
     <html lang="en" op="news">
       <head>
+        <base href="/" />
         ${head.custom(ogImage, value.title, ogDescription, undefined, [
           "/",
           "/new?cached=true",
@@ -344,7 +376,8 @@ export default async function (trie, theme, index, value, referral) {
                                   >${!comment.flagged
                                     ? html`<a
                                         style="color: black;"
-                                        href="/upvotes?address=${comment.identity}"
+                                        href="/upvotes?address=${comment
+                                          .identity.address}"
                                         >${truncateName(comment.displayName)}</a
                                       >`
                                     : truncateName(comment.displayName)}</b
@@ -370,7 +403,9 @@ export default async function (trie, theme, index, value, referral) {
                                     class="caster-link share-link"
                                     title="Share"
                                     style="white-space: nowrap;"
-                                    onclick="event.preventDefault(); navigator.share({url: 'https://news.kiwistand.com/stories?index=0x${index}#0x${comment.index}'});"
+                                    onclick="event.preventDefault(); navigator.share({url: 'https://news.kiwistand.com/stories/${getSlug(
+                                      value.title,
+                                    )}?index=0x${index}#0x${comment.index}'});"
                                   >
                                     ${ShareIcon(
                                       "padding: 0 3px 1px 0; vertical-align: middle; height: 13px; width: 13px;",
@@ -390,36 +425,103 @@ export default async function (trie, theme, index, value, referral) {
                                     >Moderated because: "${comment.reason}"</i
                                   >`
                                 : html`<span
-                                    class="comment-text"
-                                    dangerouslySetInnerHTML=${{
-                                      __html: comment.title
-                                        .split("\n")
-                                        .map((line) => {
-                                          if (line.startsWith(">")) {
-                                            return `<div style="border-left: 3px solid #ccc; padding-left: 10px; margin: 8px 0 0 0; color: #666;">${DOMPurify.sanitize(
-                                              line.substring(2),
-                                            )}</div>`;
-                                          }
-                                          return line.trim()
-                                            ? `<div>${DOMPurify.sanitize(
-                                                line,
-                                              )}</div>`
-                                            : "<br/>";
-                                        })
-                                        .join("")
-                                        .replace(
-                                          /(https?:\/\/[^\s<]+)/g,
-                                          (url) =>
-                                            `<a class="meta-link selectable-link" href="${url}" target="${
-                                              url.startsWith(
-                                                "https://news.kiwistand.com",
-                                              )
-                                                ? "_self"
-                                                : "_blank"
-                                            }">${url}</a>`,
-                                        ),
-                                    }}
-                                  ></span>`}
+                                      class="comment-text"
+                                      dangerouslySetInnerHTML=${{
+                                        __html: comment.title
+                                          .split("\n")
+                                          .map((line) => {
+                                            if (line.startsWith(">")) {
+                                              return `<div style="border-left: 3px solid #ccc; padding-left: 10px; margin: 8px 0 0 0; color: #666;">${DOMPurify.sanitize(
+                                                line.substring(2),
+                                              )}</div>`;
+                                            }
+                                            return line.trim()
+                                              ? `<div>${DOMPurify.sanitize(
+                                                  line,
+                                                )}</div>`
+                                              : "<br/>";
+                                          })
+                                          .join("")
+                                          .replace(
+                                            /(https?:\/\/[^\s<]+)/g,
+                                            (url) =>
+                                              `<a class="meta-link selectable-link" href="${url}" target="${
+                                                url.startsWith(
+                                                  "https://news.kiwistand.com",
+                                                )
+                                                  ? "_self"
+                                                  : "_blank"
+                                              }">${url}</a>`,
+                                          ),
+                                      }}
+                                    ></span>
+                                    <div
+                                      class="reactions-container"
+                                      data-comment-index="${comment.index}"
+                                      data-comment="${JSON.stringify({
+                                        ...comment,
+                                        reactions: (
+                                          comment.reactions || []
+                                        ).map((reaction) => ({
+                                          ...reaction,
+                                          reactors: reaction.reactors,
+                                          reactorProfiles:
+                                            reaction.reactorProfiles,
+                                        })),
+                                      })}"
+                                      style="display: flex; flex-wrap: wrap; gap: 16px; min-height: 59px;"
+                                    >
+                                      ${["🥝", "🔥", "👀", "💯", "🤭"].map(
+                                        (emoji) => {
+                                          const reaction =
+                                            comment.reactions.find(
+                                              (r) => r.emoji === emoji,
+                                            );
+                                          return html`
+                                            <div
+                                              style="margin-top: 32px; display: inline-flex; align-items: center; padding: 4px 12px; background-color: var(--bg-off-white); border: var(--border-thin); border-radius: 2px; font-size: 10pt;"
+                                            >
+                                              <span
+                                                style="margin-right: ${reaction?.reactorProfiles?.filter(
+                                                  (profile) =>
+                                                    profile.safeAvatar,
+                                                )?.length
+                                                  ? "4px"
+                                                  : "0"}"
+                                                >${emoji}</span
+                                              >
+                                              ${reaction?.reactorProfiles
+                                                ?.filter(
+                                                  (profile) =>
+                                                    profile.safeAvatar,
+                                                )
+                                                .map(
+                                                  (profile, i) => html`
+                                                    <img
+                                                      loading="lazy"
+                                                      src="${profile.safeAvatar}"
+                                                      alt="reactor"
+                                                      style="z-index: ${i}; width: ${i >
+                                                      0
+                                                        ? "13px"
+                                                        : "12px"}; height: ${i >
+                                                      0
+                                                        ? "13px"
+                                                        : "12px"}; border-radius: 2px; border: ${i >
+                                                      0
+                                                        ? "1px solid #f3f3f3"
+                                                        : "1px solid #828282"}; margin-left: ${i >
+                                                      0
+                                                        ? "-4px"
+                                                        : "0"};"
+                                                    />
+                                                  `,
+                                                )}
+                                            </div>
+                                          `;
+                                        },
+                                      )}
+                                    </div>`}
                             </span>`,
                         )}
                       </div>
@@ -427,7 +529,7 @@ export default async function (trie, theme, index, value, referral) {
                   </tr>`
                 : null}
               <tr>
-                <td>
+                <td style="padding-top: 20px;">
                   <nav-comment-input data-story-index="0x${index}">
                     <div style="margin: 0 1rem 1rem 1rem;">
                       <textarea

@@ -1,5 +1,6 @@
 import { env } from "process";
 import path from "path";
+import normalizeUrl from "normalize-url";
 
 import DOMPurify from "isomorphic-dompurify";
 import ogs from "open-graph-scraper-lite";
@@ -12,7 +13,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import { fetchCache as fetchCacheFactory } from "./utils.mjs";
 
-import cache from "./cache.mjs";
+import cache, { lifetimeCache } from "./cache.mjs";
 import log from "./logger.mjs";
 
 const fetchCache = new FileSystemCache({
@@ -70,6 +71,16 @@ const twitterFrontends = [
 ];
 const CLAUDE_DOMAINS = ["warpcast.com", "fxtwitter.com", ...twitterFrontends];
 
+const TITLE_COMPLIANCE = `
+Format this title according to these rules:
+ 1. Use sentence case (capitalize first word only)
+ 2. Remove any emojis
+ 3. Maximum 80 characters
+ 4. No trailing period
+ 5. Keep any existing dash (-) or colon (:) formatting
+ 6. Format dates as YYYY-MM-DD
+`;
+
 const GUIDELINES = `We have an opportunity to build our own corner of the onchain internet. With awesome people, links, resources, and learning.
 
 Our content focuses on:
@@ -81,7 +92,7 @@ Our content focuses on:
 - Anything else our community finds fascinating, from philosophy through science to infrastructure
 
 Title Guidelines:
-- Maximum 80 characters
+- Maximum 80 characters, not one character more as this will block submission!!!
 - Use sentence case instead of title case
 - Must be clear and descriptive
 - No sensationalist journalism or clickbait
@@ -97,6 +108,7 @@ Title Guidelines:
 - For crypto content, mention relevant chains/protocols where appropriate
 - Always make factual statements and say things like they are
 - Be precise and direct. Be intentional Name names, name handles etc
+- Make it: "@handle: {what person said on Farcaster or X}"
 
 `;
 
@@ -151,6 +163,63 @@ async function generateClaudeTitle(content) {
   }
 }
 
+async function fixTitle(title) {
+  const prompt = `Here are our submission guidelines:\n\n${TITLE_COMPLIANCE}\n\nModify the following title minimally so that it fully complies with these guidelines. Keep all information in the title. Only modify syntactically. Return only a JSON object with a "title" property containing the modified title.\nTitle: "${title}"`;
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model: "claude-3-5-haiku-20241022",
+      max_tokens: 100,
+      temperature: 0,
+      tools: [
+        {
+          name: "generate_title",
+          description:
+            "Generate a title following the provided guidelines for our Web3/crypto hacker news platform.",
+          input_schema: {
+            type: "object",
+            properties: {
+              title: {
+                type: "string",
+                description:
+                  "The generated title that follows all provided guidelines",
+              },
+            },
+            required: ["title"],
+          },
+        },
+      ],
+      tool_choice: { type: "tool", name: "generate_title" },
+      messages: [
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+    });
+  } catch (error) {
+    console.error("fixTitle API request failed:", error);
+    return null;
+  }
+  try {
+    let toolUse = response.content.find((c) => c.type === "tool_use");
+    if (toolUse && toolUse.input && toolUse.input.title) {
+      return toolUse.input.title;
+    } else if (response.completion && response.completion.trim().length > 0) {
+      console.warn(
+        "No tool_use block found, falling back to response.completion",
+      );
+      return response.completion.trim();
+    } else {
+      console.error("No title found in fixTitle response");
+      return null;
+    }
+  } catch (error) {
+    console.error("Error extracting title in fixTitle:", error);
+    return null;
+  }
+}
+
 async function extractWarpcastContent(url) {
   try {
     const apiUrl = `https://api.neynar.com/v2/farcaster/cast?identifier=${url}&type=url`;
@@ -165,24 +234,15 @@ async function extractWarpcastContent(url) {
     });
 
     const data = await response.json();
-    return data?.cast?.text || null;
+    if (!data?.cast) return null;
+    return {
+      text: data.cast.text,
+      author: data.cast.author.username,
+    };
   } catch (error) {
     console.error("Neynar API error:", error);
     return null;
   }
-}
-
-function extractTwitterContent(html) {
-  const tweetTextMatch = html.match(
-    /data-testid="tweetText"[^>]*>(.*?)<\/div>/s,
-  );
-  if (tweetTextMatch) {
-    return tweetTextMatch[1]
-      .replace(/<[^>]*>/g, " ") // Remove HTML tags
-      .replace(/\s+/g, " ") // Normalize whitespace
-      .trim();
-  }
-  return null;
 }
 
 async function extractCanonicalLink(html) {
@@ -241,7 +301,11 @@ const getYTId = (url) => {
   }
 };
 
-export const metadata = async (url) => {
+export const metadata = async (
+  url,
+  generateTitle = false,
+  submittedTitle = undefined,
+) => {
   let urlObj;
   try {
     urlObj = new URL(url);
@@ -330,20 +394,30 @@ export const metadata = async (url) => {
     ...twitterFrontends,
   ];
   let output = {};
-  if (hostname === "warpcast.com") {
-    const castContent = await extractWarpcastContent(url);
-    if (castContent) {
-      //const claudeTitle = await generateClaudeTitle(castContent);
-      //if (claudeTitle) {
-      //  output.ogTitle = claudeTitle;
-      //}
+  if (generateTitle) {
+    if (hostname === "warpcast.com") {
+      const cast = await extractWarpcastContent(url);
+      if (cast) {
+        const castContent = `Cast by ${cast.author}: ${cast.text}`;
+        const claudeTitle = await generateClaudeTitle(castContent);
+        if (claudeTitle) {
+          output.ogTitle = claudeTitle;
+        }
+      }
+    } else if (
+      twitterFrontends.includes(hostname) &&
+      !ogDescription?.includes("x.com/i/article/")
+    ) {
+      const tweetAuthor = result.ogTitle || result.twitterCreator;
+      const tweetContent = `Tweet by ${tweetAuthor}: ${ogDescription}`;
+      const claudeTitle = await generateClaudeTitle(tweetContent);
+      if (claudeTitle) {
+        output.ogTitle = claudeTitle;
+      }
     }
-  } else if (bannedTitleDomains.includes(hostname)) {
-    //const claudeTitle = await generateClaudeTitle(ogDescription);
-    //if (claudeTitle) {
-    //  output.ogTitle = claudeTitle;
-    //}
-  } else if (ogTitle) {
+  }
+
+  if (!output.ogTitle && ogTitle && !bannedTitleDomains.includes(hostname)) {
     output.ogTitle = ogTitle;
   }
 
@@ -371,6 +445,22 @@ export const metadata = async (url) => {
 
   const pagespeed = await getPageSpeedScore(url);
   output.pagespeed = pagespeed;
+
+  if (submittedTitle) {
+    const normalized = normalizeUrl(url, { stripWWW: false });
+    const cacheKey = `compliantTitle-${normalized}`;
+    if (lifetimeCache.has(cacheKey)) {
+      output.compliantTitle = lifetimeCache.get(cacheKey);
+    } else {
+      fixTitle(submittedTitle)
+        .then((compliant) => {
+          if (compliant) {
+            lifetimeCache.set(cacheKey, compliant);
+          }
+        })
+        .catch((err) => log(`fixTitle background error: ${err}`));
+    }
+  }
 
   return output;
 };

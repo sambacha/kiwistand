@@ -3,6 +3,15 @@ import SwipeableDrawer from "@mui/material/SwipeableDrawer";
 import { ChatsSVG } from "./icons.jsx";
 import { isIOS } from "./session.mjs";
 
+// List of paths where the search component should be hidden
+const HIDDEN_PATHS = [
+  '/indexing',
+  '/passkeys',
+  '/demonstration',
+  '/email-notifications',
+  '/invite'
+];
+
 const UpvoteSVG = (props) => (
   <svg
     style={props.style}
@@ -37,42 +46,15 @@ const SearchInterface = () => {
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  const performSearch = async (searchText) => {
-    try {
-      const response = await fetch("/api/v1/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: searchText }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Search failed");
-      }
-
-      const data = await response.json();
-      if (data.status === "success" && data.data?.data) {
-        setResults(data.data.data);
-      } else {
-        setResults([]);
-      }
-    } catch (error) {
-      console.error("Search error:", error);
-      setResults([]);
-    } finally {
-      setIsLoading(false);
-    }
+  // Check if current path is in the hidden paths list
+  const shouldHideSearch = () => {
+    const currentPath = window.location.pathname;
+    return HIDDEN_PATHS.some(path => currentPath === path);
   };
 
   const handleSearch = (value) => {
-    if (debounceTimer.current) {
-      clearTimeout(debounceTimer.current);
-    }
-
     if (value.trim()) {
-      setIsLoading(true);
-      debounceTimer.current = setTimeout(() => performSearch(value), 300);
-    } else {
-      setResults([]);
+      window.location.href = `/search?q=${encodeURIComponent(value.trim())}`;
     }
   };
 
@@ -135,7 +117,8 @@ const SearchInterface = () => {
     </div>
   );
 
-  if (!isMobile) return null;
+  // Hide if not mobile or if on a path where search should be hidden
+  if (!isMobile || shouldHideSearch()) return null;
 
   return (
     <>
@@ -196,7 +179,7 @@ const SearchInterface = () => {
         disableDiscovery={iOS}
         PaperProps={{
           style: {
-            height: "75vh",
+            height: "20vh",
             borderTopLeftRadius: "2px",
             borderTopRightRadius: "2px",
             backgroundColor: "var(--background-color0)",
@@ -212,60 +195,51 @@ const SearchInterface = () => {
             flexDirection: "column",
           }}
         >
-          <div style={{ marginBottom: "16px" }}>
-            <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                handleSearch(e.target.value);
-              }}
-              style={{
-                width: "100%",
-                padding: "8px",
-                fontSize: "16px",
-                border: "var(--border-thin)",
-                borderRadius: "2px",
-                backgroundColor: "white",
-                fontFamily: "var(--font-family)",
-                outline: "none",
-              }}
-              placeholder="Search all of Kiwi..."
-            />
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-              overflowY: "auto",
-            }}
-          >
-            {isLoading ? (
-              <div
+          <div style={{ padding: "16px 16px 0 16px" }}>
+            <div style={{ 
+              display: "flex",
+              gap: "8px",
+              alignItems: "center"
+            }}>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSearch(e.target.value);
+                  }
+                }}
                 style={{
-                  textAlign: "center",
-                  padding: "16px",
-                  color: "var(--visited-link)",
+                  flex: "0 0 70%",
+                  padding: "8px",
+                  fontSize: "16px",
+                  border: "var(--border-thin)",
+                  borderRadius: "2px",
+                  backgroundColor: "white",
+                  fontFamily: "var(--font-family)",
+                  outline: "none",
+                }}
+                placeholder="Search..."
+              />
+              <button
+                onClick={() => handleSearch(query)}
+                style={{
+                  flex: "1",
+                  padding: "8px 12px",
+                  background: "black",
+                  color: "white",
+                  border: "var(--border)",
+                  borderRadius: "2px",
+                  cursor: "pointer",
+                  fontSize: "10pt",
+                  fontFamily: "var(--font-family)",
                 }}
               >
-                Loading...
-              </div>
-            ) : results.length > 0 ? (
-              results.map((result) => (
-                <SearchResult key={result.index} result={result} />
-              ))
-            ) : query ? (
-              <div
-                style={{
-                  textAlign: "center",
-                  padding: "16px",
-                  color: "var(--visited-link)",
-                }}
-              >
-                No results found
-              </div>
-            ) : null}
+                Search
+              </button>
+            </div>
           </div>
         </div>
       </SwipeableDrawer>
